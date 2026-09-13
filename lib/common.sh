@@ -35,6 +35,17 @@ COLOR_YELLOW="\033[1;33m"
 COLOR_RED="\033[1;31m"
 COLOR_BLUE="\033[1;34m"
 COLOR_RESET="\033[0m"
+# 测速/延迟等关键数值强调：加粗 + 高亮（亮绿）+ 绿色字体
+COLOR_NUM_HL="\033[1;92m"
+
+# 关键数值高亮：仅对纯数字（含小数）着色，占位值（未测/未设等）原样输出
+hl_num() {
+  local v="${1:-}"
+  case "${v}" in
+  '' | *[!0-9.]*) printf '%s' "${v}" ;;
+  *) printf '%b%s%b' "${COLOR_NUM_HL}" "${v}" "${COLOR_RESET}" ;;
+  esac
+}
 
 LOCK_HELD=false
 LOCK_FD=""
@@ -1056,8 +1067,8 @@ net_tune_confirm_measurement() {
   cap_mb="$(get_tcp_buffer_cap_mb)"
   buffer_mb="$(calculate_net_tune_buffer_mb "${bandwidth}" "${region}")"
   echo >&2
-  print_info "net_tune 自动测速结果：约 ${bandwidth} Mbps${latency:+，延迟约 ${latency} ms}（${region} 档）。" >&2
-  print_info "推荐 TCP 缓冲：${buffer_mb}MB（内存上限 ${cap_mb}MB 内）。" >&2
+  print_info "net_tune 自动测速结果：约 ${COLOR_NUM_HL}${bandwidth}${COLOR_RESET} Mbps${latency:+，延迟约 ${COLOR_NUM_HL}${latency}${COLOR_RESET} ms}（${region} 档）。" >&2
+  print_info "推荐 TCP 缓冲：${COLOR_NUM_HL}${buffer_mb}${COLOR_RESET}MB（内存上限 ${COLOR_NUM_HL}${cap_mb}${COLOR_RESET}MB 内）。" >&2
   while true; do
     print_info "网络不佳时自动测速常有误差，可输入  新带宽 新延迟  覆写。" >&2
     read -r -p "直接回车确认，或输入新值（格式：带宽 延迟，如 500 120）: " answer || true
@@ -1070,7 +1081,11 @@ net_tune_confirm_measurement() {
     if [[ "${new_bw}" =~ ^[0-9]+$ ]] && [ "${new_bw}" -gt 0 ]; then
       bandwidth="${new_bw}"
       [[ "${new_lat}" =~ ^[0-9]+$ ]] && latency="${new_lat}"
-      print_ok "已覆写：带宽 ${bandwidth} Mbps，延迟 ${latency:-未测} ms。" >&2
+      if [ -n "${latency}" ]; then
+        print_ok "已覆写：带宽 ${COLOR_NUM_HL}${bandwidth}${COLOR_RESET} Mbps，延迟 ${COLOR_NUM_HL}${latency}${COLOR_RESET} ms。" >&2
+      else
+        print_ok "已覆写：带宽 ${COLOR_NUM_HL}${bandwidth}${COLOR_RESET} Mbps，延迟 未测 ms。" >&2
+      fi
       break
     fi
     print_warn "输入无效，应为两个正整数（带宽 延迟）。"
@@ -1183,7 +1198,7 @@ apply_network_tune() {
         if [ "${region_set:-}" = "yes" ]; then
           region="$(infer_net_tune_region "${latency}")"
         fi
-        print_ok "net_tune：测速结果 带宽约 ${bandwidth} Mbit/s${latency:+、延迟约 ${latency} ms}（${region} 档）。"
+        print_ok "net_tune：测速结果 带宽约 ${COLOR_NUM_HL}${bandwidth}${COLOR_RESET} Mbit/s${latency:+、延迟约 ${COLOR_NUM_HL}${latency}${COLOR_RESET} ms}（${region} 档）。"
       else
         print_warn "自动测速不可用（缺少 speedtest 或网络受限），按带宽 1000Mbps 档位优化。"
         bandwidth="1000"
@@ -1198,7 +1213,7 @@ apply_network_tune() {
     set_setting "net_tune_latency_ms" "${latency:-}"
     set_setting "net_tune_region" "${region}"
     set_setting "net_tune_buffer_mb" "${buffer_mb}"
-    print_ok "net_tune：带宽约 ${bandwidth} Mbps（${region} 档），内存上限 ${cap_mb}MB，推荐 TCP 缓冲 ${buffer_mb}MB。"
+    print_ok "net_tune：带宽约 ${COLOR_NUM_HL}${bandwidth}${COLOR_RESET} Mbps（${region} 档），内存上限 ${COLOR_NUM_HL}${cap_mb}${COLOR_RESET}MB，推荐 TCP 缓冲 ${COLOR_NUM_HL}${buffer_mb}${COLOR_RESET}MB。"
   fi
 
   buffer_bytes=$((buffer_mb * 1024 * 1024))

@@ -4,7 +4,7 @@ set -eEuo pipefail
 umask 077
 
 PROJECT_NAME="Singbox 管理器"
-SCRIPT_VERSION="1.2.7"
+SCRIPT_VERSION="1.2.8"
 REPO_OWNER="hynize"
 REPO_NAME="singbox-manager"
 
@@ -2621,7 +2621,7 @@ net_tune_display_values() {
   buf="$(get_setting "net_tune_buffer_mb")"
   cap="$(get_tcp_buffer_cap_mb)"
   printf '当前：带宽 %s Mbps | 延迟 %s ms | 档位 %s | TCP缓冲 %s MB（内存上限 %s MB）\n' \
-    "${bw:-未测}" "${rtt:-未测}" "${region:-未设}" "${buf:-未算}" "${cap}"
+    "$(hl_num "${bw:-未测}")" "$(hl_num "${rtt:-未测}")" "${region:-未设}" "$(hl_num "${buf:-未算}")" "$(hl_num "${cap}")"
 }
 
 # 手动重填带宽/延迟后：重算档位与缓冲、持久化、立即应用（BBR+FQ+缓存设置）
@@ -2639,7 +2639,7 @@ net_tune_apply_manual() {
   if [ "$(id -u 2>/dev/null || echo 1)" = "0" ] && command_exists sysctl; then
     apply_sysctls "${buffer_bytes}"
   fi
-  print_ok "已应用：带宽 ${bandwidth} Mbps，延迟 ${latency} ms（${region} 档）→ TCP 缓冲 ${buffer_mb}MB。"
+  print_ok "已应用：带宽 ${COLOR_NUM_HL}${bandwidth}${COLOR_RESET} Mbps，延迟 ${COLOR_NUM_HL}${latency}${COLOR_RESET} ms（${region} 档）→ TCP 缓冲 ${COLOR_NUM_HL}${buffer_mb}${COLOR_RESET}MB。"
 }
 
 net_tune_menu() {
