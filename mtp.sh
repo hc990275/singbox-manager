@@ -17,7 +17,7 @@ set -eEuo pipefail
 #   mtp_ip_mode   监听模式 v4 / v6 / dual（可选，默认 v4）
 ###############################################################################
 
-SCRIPT_VERSION="1.2.6"
+SCRIPT_VERSION="1.2.7"
 
 # MTG GO 版本与校验：上游 jyucoeng/singbox-tools 的 Go 构建镜像
 MTP_WORKDIR="/opt/mtproxy"

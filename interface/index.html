@@ -294,7 +294,7 @@
           <label>源站私钥（PEM） <span class="pill">key</span> <b style="color:var(--warn)">必填</b></label>
           <textarea id="ws_key_content" rows="5" placeholder="粘贴 PEM 私钥全文，如：&#10;-----BEGIN PRIVATE KEY-----&#10;MIIE...&#10;-----END PRIVATE KEY-----"></textarea>
         </div>
-        <p class="note">客户端连接地址 = CF 优选域名(<span class="pill">cdn_host</span>):<span class="pill">cdn_port</span>；SNI/Host 用<b>必填</b>的回源域名 <span class="pill">ws_cdn_sni</span>。SNI 安全提示：不要使用 Cloudflare/Akamai 等代理或 CDN 域名作为 SNI。<br>CF 证书方案：必须<b>粘贴</b>源站 PEM 证书/私钥内容（用 Cloudflare Origin CA 证书），命令自动 base64 编码并在服务器上解码存储（写入托管证书目录），配 Cloudflare SSL=Full(Strict)。回源目标端口建议 <span class="pill">wspt=443</span>；若用其他端口，需在 CF 加 Origin Rule 把 443 改写到你设置的 wspt。</p>
+        <p class="note">客户端连接地址 = CF 优选域名(cdn_host):cdn_port；SNI/Host 用必填的回源域名 ws_cdn_sni。<br>SNI 安全提示：不要使用 Cloudflare/Akamai 等代理或 CDN 域名作为 SNI。<br>CF 证书方案：必须粘贴源站 PEM 证书/私钥内容（用 Cloudflare Origin CA 证书），命令自动 base64 编码并在服务器上解码存储（写入托管证书目录），配 Cloudflare SSL=Full(Strict)。回源目标端口建议 wspt=443；若用其他端口，需在 CF 加 Origin Rule 把 443 改写到你设置的 wspt。</p>
       </section>
       </div>
 
@@ -376,7 +376,6 @@
           <input type="text" id="agk" placeholder="ey 开头字符串或 {…} JSON">
         </div>
         <div class="sep"></div>
-        <p class="note">Argo 客户端连接地址 = 独立优选域名(<span class="pill">argo_cdn_host</span>):<span class="pill">argo_cdn_port</span>，与 ⑤ VLESS+WS+CDN 互不影响、可单独设置。Argo 支持临时隧道（域名自动分配）与固定隧道（需自备 Cloudflare Tunnel，<b>同时填写 agn + agk</b>，缺一则回退临时隧道）。临时隧道域名会变化，安装后用 <b>sbm list</b> 查看。cloudflared 安装遵循强校验：拿不到官方 SHA256 校验值时默认拒绝安装，绝不以版本自报代替完整性校验。</p>
       </section>
 
       <section class="card">
@@ -400,7 +399,7 @@
           <label>监听端口 <span class="pill">mtpt</span></label>
           <input type="text" class="port-input" id="mtpt" placeholder="填写端口即启用，或点 🎲 随机" inputmode="numeric">
         </div>
-        <p class="note">MTProxy 为独立管理脚本（<b>mtp</b>），与 sbm 分离。伪装域名、通信密钥、监听模式（默认 v4）由服务器自动随机生成。填端口即可一键安装。</p>
+        <p class="note">MTProxy 为独立管理脚本（mtp），与 sbm 分离。<br>伪装域名、通信密钥、监听模式（默认 v4）由服务器自动随机生成。填端口即可一键安装。</p>
         <div class="cmdlist" id="mtp-cmds"></div>
       </section>
 
@@ -427,7 +426,6 @@
             <option value="raw">raw.githubusercontent.com/main（开发者选项 · 不经 Release 强校验）</option>
           </select>
         </div>
-        <p class="note">rep 会先清空已有节点再重建，适合首次部署或重置配置；ins 保留已有节点，适合追加协议。两个动作都会自动安装/更新 sing-box 内核。</p>
       </section>
       </div>
 
