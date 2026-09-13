@@ -5,10 +5,10 @@ umask 077
 
 REPO_OWNER="hynize"
 REPO_NAME="singbox-manager"
-PROJECT_VERSION="v1.2.8"
-PACKAGE_NAME="singbox-manager-v1.2.8.tar.gz"
+PROJECT_VERSION="v1.3.0"
+PACKAGE_NAME="singbox-manager-v1.3.0.tar.gz"
 # 发布流程：scripts/build-release-bundle.sh 构建可复现 bundle，其 SHA256 与此处一致
-PACKAGE_SHA256="277531d18c96b298bf510328132881c31cadde08c9292607942f9b492b6dcad0"
+PACKAGE_SHA256="e52e663803bc994568a99e4e00b34e03ca65e4e059a987475396a5abe8daf2ce"
 PACKAGE_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${PROJECT_VERSION}/${PACKAGE_NAME}"
 
 INSTALL_BIN="/usr/local/bin/sbm"
@@ -74,15 +74,20 @@ install_bundle() {
   fi
 
   # 安装前校验候选脚本语法，避免半写入造成混装
-  if ! bash -n "${root_dir}/sb.sh" || ! bash -n "${root_dir}/mtp.sh" || ! bash -n "${root_dir}/lib/common.sh" || ! bash -n "${root_dir}/scripts/watchdog.sh"; then
-    rm -rf "$tmpdir"
-    echo "发布包脚本语法校验失败，已取消安装。" >&2
-    exit 1
-  fi
+  for sbm_module in ui core nodes menu; do
+    if ! bash -n "${root_dir}/sb.sh" || ! bash -n "${root_dir}/mtp.sh" || ! bash -n "${root_dir}/lib/common.sh" || ! bash -n "${root_dir}/lib/${sbm_module}.sh" || ! bash -n "${root_dir}/scripts/watchdog.sh"; then
+      rm -rf "$tmpdir"
+      echo "发布包脚本语法校验失败，已取消安装。" >&2
+      exit 1
+    fi
+  done
 
   install -d -m 700 "$LIB_DIR" "$BASE_DIR"
   # 先装共享库与 watchdog，最后装入口 sbm
   install -m 0644 "${root_dir}/lib/common.sh" "${COMMON_LIB}"
+  for sbm_module in ui core nodes menu; do
+    install -m 0644 "${root_dir}/lib/${sbm_module}.sh" "${LIB_DIR}/${sbm_module}.sh"
+  done
   install -m 0644 "${root_dir}/metadata/upstream.env" "${UPSTREAM_ENV}"
   install -m 0755 "${root_dir}/scripts/watchdog.sh" "${WATCHDOG_PATH}"
   install -m 0755 "${root_dir}/sb.sh" "${INSTALL_BIN}"
@@ -90,6 +95,9 @@ install_bundle() {
 
   chmod 0755 "${INSTALL_BIN}" "${WATCHDOG_PATH}" "${MTP_BIN}"
   chmod 0644 "${COMMON_LIB}" "${UPSTREAM_ENV}"
+  for sbm_module in ui core nodes menu; do
+    chmod 0644 "${LIB_DIR}/${sbm_module}.sh"
+  done
   rm -rf "$tmpdir"
 }
 
