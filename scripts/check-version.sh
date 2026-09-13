@@ -12,9 +12,11 @@ fail() {
 
 version_file="$(sed 's/^v//' VERSION | tr -d '\r\n')"
 version_sb="$(grep -m1 '^SCRIPT_VERSION=' sb.sh | cut -d'"' -f2)"
+version_mtp="$(grep -m1 '^SCRIPT_VERSION=' mtp.sh | cut -d'"' -f2)"
 version_install="$(grep -m1 '^PROJECT_VERSION=' install.sh | sed 's/.*v//; s/"$//' | tr -d '\r\n')"
 
 [ "${version_file}" = "${version_sb}" ] || fail "VERSION(${version_file}) 与 sb.sh SCRIPT_VERSION(${version_sb}) 不一致"
+[ "${version_file}" = "${version_mtp}" ] || fail "VERSION(${version_file}) 与 mtp.sh SCRIPT_VERSION(${version_mtp}) 不一致"
 [ "${version_file}" = "${version_install}" ] || fail "VERSION(${version_file}) 与 install.sh PROJECT_VERSION(${version_install}) 不一致"
 
 # README / interface 的安装入口必须指向 releases/latest，不得钉死版本号，

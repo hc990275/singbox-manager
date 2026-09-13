@@ -395,7 +395,17 @@
       </section>
 
       <section class="card">
-        <h2>⑦ 执行动作 <span class="tip">尾部参数</span></h2>
+        <h2>⑦ MTProxy <span class="tip">独立 Go 版（mtg），不依赖 sing-box</span></h2>
+        <div class="row">
+          <label>监听端口 <span class="pill">mtpt</span></label>
+          <input type="text" class="port-input" id="mtpt" placeholder="填写端口即启用，或点 🎲 随机" inputmode="numeric">
+        </div>
+        <p class="note">MTProxy 为独立管理脚本（<b>mtp</b>），与 sbm 分离。伪装域名、通信密钥、监听模式（默认 v4）由服务器自动随机生成。填端口即可一键安装。</p>
+        <div class="cmdlist" id="mtp-cmds"></div>
+      </section>
+
+      <section class="card">
+        <h2>⑧ 执行动作 <span class="tip">尾部参数</span></h2>
         <div class="row">
           <label>执行动作</label>
           <select id="sbm-tail">
@@ -474,6 +484,12 @@
     ['tail -n 100 /usr/local/etc/singbox-manager/logs/sing-box.log', '查看 sing-box 运行日志（最近100行）'],
     ['cat /usr/local/etc/singbox-manager/config.json', '查看生成的 sing-box 配置'],
     ['ls -l /usr/local/etc/singbox-manager/certs/', '查看托管证书文件']
+  ];
+
+  var MTP_CMDS = [
+    ['mtp info', '查看已安装服务连接信息（tg://proxy 链接）'],
+    ['mtp restart', '重启 MTProxy 服务'],
+    ['mtp un', '全量卸载并清理（服务/二进制/配置）']
   ];
 
   /* ---------------- helpers ---------------- */
@@ -577,6 +593,8 @@
   function buildSbm() {
     var tail = val('sbm-tail') || 'rep';
     var envs = [];
+    // MTProxy：独立 Go 版，端口变量 mtpt；与下方 sing-box 协议无关
+    numEnv('mtpt', 'mtpt', envs);
     // 直连协议端口
     ['vlrt', 'wspt', 'tupt', 'anypt', 'hypt', 'socks5pt'].forEach(function (k) { numEnv(k, k, envs); });
     // Argo（④ 启用开关=vlpt 时才带上；argo_cdn_host/argo_cdn_port 独立于 WS-CDN）
@@ -697,6 +715,7 @@
   }
 
   renderCmdList('sbm-cmds', SBM_CMDS);
+  renderCmdList('mtp-cmds', MTP_CMDS);
 
   // SNI 伪装域名候选（下拉选择填入输入框，输入框仍可手输，留空用内置默认值）
   var SNI_LIST = ['www.apple.com', 'www.bing.com', 'www.ua.edu', 'www.yahoo.com', 'dl.google.com'];

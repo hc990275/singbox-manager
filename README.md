@@ -2,7 +2,7 @@
 
 **在线一键命令生成器：<https://sbm.1733.dpdns.org>** —— 填协议端口即可生成下面的环境变量一键安装命令。
 
-面向常用 `sing-box` 场景的管理脚本：安装核心、添加节点、生成分享链接、自动保活一体化，支持 VLESS-Reality / VLESS-WS-TLS / AnyTLS / VLESS-Argo / TUIC v5 / Hysteria2 / SOCKS5。
+面向常用 `sing-box` 场景的管理脚本：安装核心、添加节点、生成分享链接、自动保活一体化，支持 VLESS-Reality / VLESS-WS-TLS / AnyTLS / VLESS-Argo / TUIC v5 / Hysteria2 / SOCKS5；并附带独立的 **MTProxy（Go mtg）** 管理脚本。
 
 ## 快速安装
 
@@ -85,10 +85,34 @@ sbm un        卸载
 
 分享链接默认使用 IPv4；菜单「9. 全局设置」可切换 `v4 / v6 / auto`（仅双栈机器需要调整）。
 
+## MTProxy（Go mtg，独立脚本）
+
+与 `sb.sh` **完全分离**的 MTProxy 管理器（工作目录 `/opt/mtproxy`，systemd 服务 `mtp`，二进制 `mtg-go` 来自 jyucoeng/singbox-tools 官方 Go 构建镜像）。单用户模式，端口由你指定，伪装域名 / 通信密钥 / 监听模式（默认 v4）由服务器自动随机生成：
+
+```bash
+# 首次安装（配合网页生成器，端口即 mtpt；伪装域、密钥、模式全部随机）
+mtpt=20086 bash <(curl -fsSL https://github.com/hynize/singbox-manager/releases/latest/download/install.sh)
+
+# 已安装时直接管理
+mtpt=20086 mtp            # 安装/更新（改端口自动重装）
+mtp info                  # 查看已安装服务连接信息（tg://proxy 链接）
+mtp restart               # 重启 MTProxy 服务
+mtp un                    # 全量卸载并清理（服务/二进制/配置/日志）
+```
+
+| 变量 | 说明 | 默认 |
+|---|---|---|
+| `mtpt` | 监听端口（必填） | 无 |
+| `mtp_domain` | 伪装域名 | 内置列表随机（apple/microsoft/amazon/bing/mozilla） |
+| `mtp_secret` | 通信密钥（32 位 hex） | 随机生成 |
+| `mtp_ip_mode` | 监听模式 `v4` / `v6` / `dual` | `v4` |
+
+MTProxy 与 sing-box 互不依赖：卸载其中一方不影响另一方；`sbm un` 只卸载 sing-box 相关，MTProxy 需单独 `mtp un`。
+
 ## 项目结构
 
 ```text
-sb.sh / install.sh / lib/common.sh / metadata/upstream.env
+sb.sh / mtp.sh / install.sh / lib/common.sh / metadata/upstream.env
 scripts/watchdog.sh          保活（systemd timer 或 cron，每分钟）
 scripts/build-release-bundle.sh
 interface/                   网页命令生成器（Pages / Workers 部署）

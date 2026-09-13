@@ -11,6 +11,7 @@ rm -rf "${PACKAGE_DIR}"
 mkdir -p "${PACKAGE_DIR}" "${DIST_DIR}"
 
 install -m 0755 "${ROOT_DIR}/sb.sh" "${PACKAGE_DIR}/sb.sh"
+install -m 0755 "${ROOT_DIR}/mtp.sh" "${PACKAGE_DIR}/mtp.sh"
 install -d -m 0755 "${PACKAGE_DIR}/lib" "${PACKAGE_DIR}/metadata" "${PACKAGE_DIR}/scripts"
 install -m 0644 "${ROOT_DIR}/lib/common.sh" "${PACKAGE_DIR}/lib/common.sh"
 install -m 0644 "${ROOT_DIR}/metadata/upstream.env" "${PACKAGE_DIR}/metadata/upstream.env"

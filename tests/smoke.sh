@@ -522,6 +522,32 @@ assert_eq "delall 后无残留证书" "0" "$(find "${CERT_DIR}" -type f | wc -l)
 # 清理 stub 进程
 kill_pid_file "${PID_FILE}" || true
 
+# --- MTProxy 独立脚本（mtp.sh）纯函数验证 ---
+# shellcheck source=../mtp.sh
+export MTP_TEST_MODE=1
+source "${ROOT_DIR}/mtp.sh"
+
+# 配置可覆盖为沙箱路径（不触碰真实 /opt/mtproxy）
+MTP_WORKDIR="${TEST_ROOT}/mtproxy"
+MTP_BIN_DIR="${MTP_WORKDIR}/bin"
+MTP_CONF="${MTP_WORKDIR}/go.conf"
+
+assert_eval_true "generate_secret 输出 32 位 hex" 's="$(generate_secret)"; [[ "$s" =~ ^[0-9a-f]{32}$ ]]'
+assert_eval_true "random_domain 命中内置列表" 'd="$(random_domain)"; printf "%s\n" "${MTP_FAKE_DOMAINS[@]}" | grep -qx "$d"'
+assert_eq "valid_port 边界 65535" "0" "$(valid_port 65535; echo $?)"
+assert_eval_false "valid_port 0 非法" 'valid_port 0'
+assert_eval_false "valid_port 非数字非法" 'valid_port 12a'
+assert_eq "env_port 合法透传" "20086" "$(env_port 20086)"
+assert_eval_false "env_port 非法拒绝" 'env_port 0x1F'
+
+# tg:// secret 编码（黄金样例：密钥 16 字节全零 + 域名 apple.com，参照上游算法）
+# secret = 00000000000000000000000000000000, domain = apple.com
+# FULL 原始字节 = ee + 16x00 + "apple.com"，base64 url-safe 无 padding
+assert_eq "mtp_tg_secret 全零密钥 apple.com" "7gAAAAAAAAAAAAAAAAAAAABhcHBsZS5jb20" "$(mtp_tg_secret "00000000000000000000000000000000" "apple.com")"
+
+# 生成的 tg 链接可解码回原文：0xee + secret(16字节) + domain ascii
+assert_eval_true "mtp_tg_secret 可解码回原文" 's="$(mtp_tg_secret "cafebabecafebabecafebabecafebabe" "www.apple.com")"; p="$(printf %s "$s" | sed "s/-/+/g;s/_/\//g")"; while [ $(( ${#p} % 4 )) -ne 0 ]; do p="$p="; done; h="$(printf %s "$p" | base64 -d 2>/dev/null | od -A n -t x1 | tr -d " \n")"; [[ "$h" == "eecafebabecafebabecafebabecafebabe7777772e6170706c652e636f6d" ]]'
+
 rm -rf "${TEST_ROOT}"
 
 echo

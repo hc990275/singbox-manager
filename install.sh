@@ -5,13 +5,14 @@ umask 077
 
 REPO_OWNER="hynize"
 REPO_NAME="singbox-manager"
-PROJECT_VERSION="v1.2.5"
-PACKAGE_NAME="singbox-manager-v1.2.5.tar.gz"
+PROJECT_VERSION="v1.2.6"
+PACKAGE_NAME="singbox-manager-v1.2.6.tar.gz"
 # 发布流程：scripts/build-release-bundle.sh 构建可复现 bundle，其 SHA256 与此处一致
-PACKAGE_SHA256="725b04160173c45799cbc8b8a5cd62ef5052798c8413ca21aedd7151e1fbf05b"
+PACKAGE_SHA256="621d08bc60eca84a37d54027f734dfac4974b9cec5bdf8de227c6c3fbf8d8d9e"
 PACKAGE_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${PROJECT_VERSION}/${PACKAGE_NAME}"
 
 INSTALL_BIN="/usr/local/bin/sbm"
+MTP_BIN="/usr/local/bin/mtp"
 LIB_DIR="/usr/local/lib/singbox-manager"
 BASE_DIR="/usr/local/etc/singbox-manager"
 WATCHDOG_PATH="${BASE_DIR}/watchdog.sh"
@@ -73,7 +74,7 @@ install_bundle() {
   fi
 
   # 安装前校验候选脚本语法，避免半写入造成混装
-  if ! bash -n "${root_dir}/sb.sh" || ! bash -n "${root_dir}/lib/common.sh" || ! bash -n "${root_dir}/scripts/watchdog.sh"; then
+  if ! bash -n "${root_dir}/sb.sh" || ! bash -n "${root_dir}/mtp.sh" || ! bash -n "${root_dir}/lib/common.sh" || ! bash -n "${root_dir}/scripts/watchdog.sh"; then
     rm -rf "$tmpdir"
     echo "发布包脚本语法校验失败，已取消安装。" >&2
     exit 1
@@ -85,8 +86,9 @@ install_bundle() {
   install -m 0644 "${root_dir}/metadata/upstream.env" "${UPSTREAM_ENV}"
   install -m 0755 "${root_dir}/scripts/watchdog.sh" "${WATCHDOG_PATH}"
   install -m 0755 "${root_dir}/sb.sh" "${INSTALL_BIN}"
+  install -m 0755 "${root_dir}/mtp.sh" "${MTP_BIN}"
 
-  chmod 0755 "${INSTALL_BIN}" "${WATCHDOG_PATH}"
+  chmod 0755 "${INSTALL_BIN}" "${WATCHDOG_PATH}" "${MTP_BIN}"
   chmod 0644 "${COMMON_LIB}" "${UPSTREAM_ENV}"
   rm -rf "$tmpdir"
 }
@@ -110,7 +112,7 @@ resolve_action() {
 }
 
 main() {
-  local bundle action
+  local bundle action mtp_install_done
   bundle="$(mktemp)"
   if ! download "${PACKAGE_URL}" "${bundle}"; then
     rm -f "${bundle}"
@@ -120,10 +122,22 @@ main() {
   verify_bundle "${bundle}"
   install_bundle "${bundle}"
   rm -f "${bundle}"
-  echo "Singbox Manager ${PROJECT_VERSION} 安装完成：${INSTALL_BIN}"
+  echo "Singbox Manager ${PROJECT_VERSION} 安装完成：${INSTALL_BIN} / ${MTP_BIN}"
+
+  # MTProxy 独立脚本：设了 mtpt 即调用 mtp 完成安装（与 sbm 动作完全独立）
+  mtp_install_done=0
+  if [ -n "${mtpt:-}" ]; then
+    bash "${MTP_BIN}" || { echo "MTProxy 安装失败。" >&2; exit 1; }
+    mtp_install_done=1
+  fi
+
   action="$(resolve_action "$@")"
   if [ -n "${action}" ]; then
     exec "${INSTALL_BIN}" "${action}"
+  fi
+  # 既无可解析的 sbm 动作又已单独安装 mtp：直接进入 mtp 的命令入口返回（匹配页面只填 mtpt 的场景）
+  if [ "${mtp_install_done}" = "1" ]; then
+    exit 0
   fi
   exec "${INSTALL_BIN}"
 }

@@ -4,7 +4,7 @@ set -eEuo pipefail
 umask 077
 
 PROJECT_NAME="Singbox 管理器"
-SCRIPT_VERSION="1.2.5"
+SCRIPT_VERSION="1.2.6"
 REPO_OWNER="hynize"
 REPO_NAME="singbox-manager"
 
@@ -2707,9 +2707,9 @@ main_menu() {
     echo "5. 重启服务"
     echo "6. 查看状态"
     echo "7. 更新项目文件"
-    echo "8. 卸载"
+    echo "8. BBR+FQ+缓存设置"
     echo "9. 全局设置"
-    echo "10. BBR+FQ+缓存设置"
+    echo "10. 卸载"
     echo "0. 退出"
     echo
     choice=""
@@ -2747,16 +2747,16 @@ main_menu() {
       pause_menu
       ;;
     8)
-      if uninstall_project; then
-        exit 0
-      fi
-      pause_menu
+      net_tune_menu
       ;;
     9)
       settings_menu
       ;;
     10)
-      net_tune_menu
+      if uninstall_project; then
+        exit 0
+      fi
+      pause_menu
       ;;
     0) exit 0 ;;
     *)
@@ -2784,6 +2784,10 @@ print_cli_usage() {
 环境变量一键安装示例（配合网页命令生成器使用）:
   vlrt=2083 hypt=2082 name='HK' bash sb.sh rep
   支持的环境变量见 README「环境变量一键安装」章节。
+
+MTProxy（Go mtg）为独立脚本，不依赖本命令：
+  mtpt=端口 bash <(curl -fsSL https://github.com/hynize/singbox-manager/releases/latest/download/install.sh)
+  或已安装时直接: mtpt=端口 mtp
 EOF
 }
 
