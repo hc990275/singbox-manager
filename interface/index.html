@@ -327,6 +327,20 @@
             <option value="0">0 · 关闭</option>
           </select>
         </div>
+        <div class="row">
+          <label>TUIC 0-RTT <span class="pill">tuic_zero_rtt</span></label>
+          <select id="tuic_zero_rtt">
+            <option value="1" selected>1 · 开启（默认，多次建连更快）</option>
+            <option value="0">0 · 关闭（兼容个别受限网络）</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>DNS 加密解析 <span class="pill">dns_servers</span></label>
+          <div class="ctl">
+            <input type="text" id="dns_servers" placeholder="留空=关闭（默认）；如 https://1.1.1.1/dns-query,https://dns.google/resolve">
+            <span class="hint-inline">逗号多源；仅支持 https/tls/udp/h3/quic</span>
+          </div>
+        </div>
       </section>
 
       <section class="card">
@@ -608,6 +622,10 @@
     strEnv('passwd', 'passwd', envs);
     // 网络内核调优：默认开启（值=1），仅显式选 0 时下发关闭
     if (val('net_tune') === '0') envs.push(['net_tune', "'0'"]);
+    // TUIC 0-RTT：默认开启（值=1），仅显式选 0 时下发关闭
+    if (val('tuic_zero_rtt') === '0') envs.push(['tuic_zero_rtt', "'0'"]);
+    // DNS 加密解析：留空=关闭（默认），非空时下发 dns_servers
+    strEnv('dns_servers', 'dns_servers', envs);
     // SNI 与 WS
     strEnv('vl_sni', 'vl_sni', envs);
     // WS-TLS（仅 CDN 中转，ws_cdn 设计 v0.3.0）：仅在启用 wspt 时下发

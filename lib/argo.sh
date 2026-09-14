@@ -52,27 +52,50 @@ argo_domain_resolvable() {
   #     因为 cloudflared 日志已出现域名即代表边缘注册成功，此时拒绝会让
   #     弱网机器的临时隧道永远写不进域名（v0.2.19 前的故障面）
   if command_exists curl && command_exists jq; then
-    local doh_verified=0 answered=0 records base_url record_type
+    # A2：2 源 × A/AAAA 四路并发核验（原串行最坏 4×6s→并行 ≈6s），
+    # 语义与原实现一致：任一有记录→已发布；有应答但不含记录→未发布；
+    # 全部不可达→fail-open（隧道日志已出现域名即放行，弱网不回滚）。
+    local probe_tmp _f raw _i=0 _any_ok=0 _any_rec=0
+    local base_url record_type
+    probe_tmp="$(mktemp -d "${BASE_DIR}/.argodoh.XXXXXX" 2>/dev/null || true)"
+    [ -n "${probe_tmp}" ] || probe_tmp="$(mktemp -d 2>/dev/null || true)"
+    [ -n "${probe_tmp}" ] || probe_tmp="${TMPDIR:-/tmp}/argodoh.$$"
+    mkdir -p "${probe_tmp}"
     for base_url in "https://1.1.1.1/dns-query?name=${domain}." "https://dns.google/resolve?name=${domain}."; do
       for record_type in A AAAA; do
-        records="$(curl -fsS --max-time 6 -H 'accept: application/dns-json' "${base_url}&type=${record_type}" 2>/dev/null | jq -r '[.Answer[]? | select(.type == 1 or .type == 28)] | length' 2>/dev/null || true)"
-        [ -n "${records}" ] || continue
-        doh_verified=1
-        if [ "${records}" -gt 0 ]; then
-          return 0
-        fi
+        (
+          cnt="$(curl -fsS --max-time 6 -H 'accept: application/dns-json' "${base_url}&type=${record_type}" 2>/dev/null | jq -r '[.Answer[]? | select(.type == 1 or .type == 28)] | length' 2>/dev/null || true)"
+          if [[ "${cnt}" =~ ^[0-9]+$ ]]; then
+            printf 'R%s' "${cnt}"
+          else
+            printf 'E'
+          fi
+        ) >"${probe_tmp}/${_i}" &
+        _i=$((_i + 1))
       done
-      if [ "${doh_verified}" = 1 ]; then
-        # 该源正常应答但 A/AAAA 均无记录 -> 确认未发布
-        answered=1
-        break
-      fi
     done
-    if [ "${doh_verified}" = 0 ]; then
-      print_warn "公共 DoH 均不可达，无法核验 ${domain} 的 DNS 发布，按隧道注册结果放行。"
+    wait || true
+    for _f in "${probe_tmp}"/*; do
+      [ -f "${_f}" ] || continue
+      raw="$(tr -d '\r\n' <"${_f}" 2>/dev/null || true)"
+      case "${raw}" in
+      R*)
+        _any_ok=1
+        if [ "${raw#R}" -gt 0 ] 2>/dev/null; then
+          _any_rec=1
+        fi
+        ;;
+      esac
+    done
+    rm -rf "${probe_tmp}"
+    if [ "${_any_rec}" = "1" ]; then
       return 0
     fi
-    [ "${answered}" = 1 ] && return 1
+    if [ "${_any_ok}" = "1" ]; then
+      return 1
+    fi
+    print_warn "公共 DoH 均不可达，无法核验 ${domain} 的 DNS 发布，按隧道注册结果放行。"
+    return 0
   fi
 
   return 1
@@ -133,19 +156,42 @@ cloudflared_latest_release_json() {
 }
 
 cloudflared_latest_version() {
-  local json tag
-  # 首选 GitHub API（含 digest 数据）；不可用时回退 jsdelivr 镜像索引（仅版本号）
-  json="$(cloudflared_latest_release_json 2>/dev/null || true)"
-  if [ -n "${json}" ]; then
-    tag="$(printf '%s' "${json}" | jq -r '.tag_name // empty' 2>/dev/null || true)"
+  local json tag jsdelivr_json gtag
+  local cf_tmp gh_file js_file
+  # 首选 GitHub API（含 digest 数据）；不可用时回退 jsdelivr 镜像索引（仅版本号）。
+  # GitHub 与 jsdelivr 并发后台（A2），先到先得，避免串行回退的额外等待；
+  # 都失败才算失败。
+  if [ -n "${CLOUDFLARED_LATEST_CACHE}" ]; then
+    json="${CLOUDFLARED_LATEST_CACHE}"
+  else
+    cf_tmp="$(mktemp -d "${BASE_DIR}/.cfver.XXXXXX" 2>/dev/null || true)"
+    [ -n "${cf_tmp}" ] || cf_tmp="$(mktemp -d 2>/dev/null || true)"
+    [ -n "${cf_tmp}" ] || cf_tmp="${TMPDIR:-/tmp}/cfver.$$"
+    mkdir -p "${cf_tmp}"
+    gh_file="${cf_tmp}/gh"
+    js_file="${cf_tmp}/js"
+    (curl -fsSL --retry 3 --retry-delay 2 --max-time 30 -H "Accept: application/vnd.github+json" \
+      "https://api.github.com/repos/cloudflare/cloudflared/releases/latest" 2>/dev/null || true) >"${gh_file}" &
+    (curl -fsSL --retry 2 --max-time 20 "https://data.jsdelivr.com/v1/package/gh/cloudflare/cloudflared" 2>/dev/null || true) >"${js_file}" &
+    wait || true
+    json="$(tr -d '\r\n' <"${gh_file}" 2>/dev/null || true)"
+    jsdelivr_json="$(tr -d '\r\n' <"${js_file}" 2>/dev/null || true)"
+    rm -rf "${cf_tmp}"
+    [ -n "${json}" ] && CLOUDFLARED_LATEST_CACHE="${json}"
+  fi
+  gtag="$(printf '%s' "${json}" | jq -r '.tag_name // empty' 2>/dev/null || true)"
+  if [ -n "${gtag}" ]; then
+    printf '%s' "${gtag}"
+    return 0
+  fi
+  if [ -n "${jsdelivr_json}" ]; then
+    tag="$(printf '%s' "${jsdelivr_json}" | jq -r '.versions[]? | select(type == "string" and test("^[0-9]{4}\\.[0-9]+\\.[0-9]+$"))' 2>/dev/null | head -n 1 || true)"
     if [ -n "${tag}" ]; then
       printf '%s' "${tag}"
       return 0
     fi
   fi
-  tag="$(curl -fsSL --retry 2 --max-time 20 "https://data.jsdelivr.com/v1/package/gh/cloudflare/cloudflared" 2>/dev/null | jq -r '.versions[]? | select(type == "string" and test("^[0-9]{4}\\.[0-9]+\\.[0-9]+$"))' 2>/dev/null | head -n 1 || true)"
-  [ -n "${tag}" ] || return 1
-  printf '%s' "${tag}"
+  return 1
 }
 
 cloudflared_latest_digest() {

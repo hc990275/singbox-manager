@@ -22,6 +22,38 @@ save_node_bundle() {
   invalidate_port_caches
 }
 
+# B4：DNS 块默认关闭（dns_servers 为空=不渲染=现行为）；开启时走加密 DNS +
+  # independent_cache，降低目标域名解析延迟并抗污染。逗号分隔多源；格式非法不渲染（输出 {}）。
+render_dns_object() {
+  # 局部名用 __ 前缀：dns_servers 是环境变量键名，同名局部变量会在
+  # env_var 的间接引用（${!key}）中命中空值（bash 动态作用域）
+  local __dns_servers="" __ds ok=0
+  __dns_servers="$(env_var "dns_servers")"
+  [ -n "${__dns_servers}" ] || {
+    printf '{}'
+    return 0
+  }
+  for __ds in ${__dns_servers//,/ }; do
+    [ -n "${__ds}" ] || continue
+    case "${__ds}" in
+    https://* | tls://* | udp://* | h3://* | quic://*) ok=1 ;;
+    *) ok=0
+      break
+      ;;
+    esac
+  done
+  if [ "${ok}" = 0 ]; then
+    printf '{}'
+    return 0
+  fi
+  jq -n --arg dns_servers "${__dns_servers}" '
+    { dns: {
+        servers: ($dns_servers | split(",") | map(select(. != "") | { address: . })),
+        independent_cache: true,
+        strategy: "ipv4_only"
+      } }'
+}
+
 render_config() {
   local inbounds_json tmp tags
   migrate_custom_certificates || return 1
@@ -56,7 +88,9 @@ render_config() {
   "info" | "debug") : ;;
   *) log_level="warn" ;;
   esac
-  if ! jq -n --arg log_path "${BASE_DIR}/logs/sing-box.log" --arg log_level "${log_level}" --argjson inbounds "${inbounds_json}" '{
+  local dns_object
+  dns_object="$(render_dns_object)"
+  if ! jq -n --arg log_path "${BASE_DIR}/logs/sing-box.log" --arg log_level "${log_level}" --argjson inbounds "${inbounds_json}" --argjson dns_object "${dns_object}" '{
     log: {
       level: $log_level,
       timestamp: true,
@@ -70,7 +104,7 @@ render_config() {
       final: "direct",
       auto_detect_interface: true
     }
-  }' >"${tmp}"; then
+  } + $dns_object' >"${tmp}"; then
     rm -f "${tmp}"
     print_err "写入 sing-box 配置失败。"
     return 1
@@ -170,6 +204,11 @@ render_inbound_for_tag() {
   *) __tfo=false ;;
   esac
 
+  # B3：TCP keepalive 显式化（NAT 映射保鲜，长连接/手机网络更稳）
+  local __tka_iv
+  __tka_iv="$(env_var "tcp_keep_alive_interval")"
+  [[ "${__tka_iv}" =~ ^[0-9]+(ms|[smh])$ ]] || __tka_iv="30s"
+
   case "$protocol" in
   vless-reality)
     jq -n \
@@ -180,12 +219,15 @@ render_inbound_for_tag() {
       --arg private_key "$private_key" \
       --arg short_id "$short_id" \
       --argjson port "$port" \
-      --argjson tfo "${__tfo}" '{
+      --argjson tfo "${__tfo}" \
+      --arg tka_iv "${__tka_iv}" '{
           type: "vless",
           tag: $tag,
           listen: "::",
           listen_port: $port,
           tcp_fast_open: $tfo,
+          tcp_keep_alive: true,
+          tcp_keep_alive_interval: $tka_iv,
           users: [{ name: $name, uuid: $uuid, flow: "xtls-rprx-vision" }],
           tls: {
             enabled: true,
@@ -210,12 +252,15 @@ render_inbound_for_tag() {
       --arg cert_file "$cert_file" \
       --arg key_file "$key_file" \
       --argjson port "$port" \
-      --argjson tfo "${__tfo}" '{
+      --argjson tfo "${__tfo}" \
+      --arg tka_iv "${__tka_iv}" '{
           type: "vless",
           tag: $tag,
           listen: "::",
           listen_port: $port,
           tcp_fast_open: $tfo,
+          tcp_keep_alive: true,
+          tcp_keep_alive_interval: $tka_iv,
           users: [{ name: $name, uuid: $uuid }],
           tls: {
             enabled: true,
@@ -233,12 +278,15 @@ render_inbound_for_tag() {
       --arg cert_file "$cert_file" \
       --arg key_file "$key_file" \
       --argjson port "$port" \
-      --argjson tfo "${__tfo}" '{
+      --argjson tfo "${__tfo}" \
+      --arg tka_iv "${__tka_iv}" '{
           type: "anytls",
           tag: $tag,
           listen: "::",
           listen_port: $port,
           tcp_fast_open: $tfo,
+          tcp_keep_alive: true,
+          tcp_keep_alive_interval: $tka_iv,
           users: [{ name: $name, password: $password }],
           tls: {
             enabled: true,
@@ -254,17 +302,27 @@ render_inbound_for_tag() {
       --arg uuid "$uuid" \
       --arg ws_path "$ws_path" \
       --argjson port "$port" \
-      --argjson tfo "${__tfo}" '{
+      --argjson tfo "${__tfo}" \
+      --arg tka_iv "${__tka_iv}" '{
           type: "vless",
           tag: $tag,
           listen: "127.0.0.1",
           listen_port: $port,
           tcp_fast_open: $tfo,
+          tcp_keep_alive: true,
+          tcp_keep_alive_interval: $tka_iv,
           users: [{ name: $name, uuid: $uuid }],
           transport: { type: "ws", path: $ws_path, max_early_data: 2048, early_data_header_name: "Sec-WebSocket-Protocol" }
         }'
     ;;
   tuic-v5)
+    # B1：TUIC 0-RTT 默认开启（TLS1.3 会话恢复，移动网络断线重连免全握手）；
+    # 安全敏感场景可 tuic_zero_rtt=0 回退为关闭
+    local __zero_rtt
+    case "$(env_var "tuic_zero_rtt")" in
+    0 | off | no | false) __zero_rtt=false ;;
+    *) __zero_rtt=true ;;
+    esac
     jq -n \
       --arg tag "$tag" \
       --arg name "$name" \
@@ -272,14 +330,15 @@ render_inbound_for_tag() {
       --arg password "$password" \
       --arg cert_file "$cert_file" \
       --arg key_file "$key_file" \
-      --argjson port "$port" '{
+      --argjson port "$port" \
+      --argjson zero_rtt "${__zero_rtt}" '{
           type: "tuic",
           tag: $tag,
           listen: "::",
           listen_port: $port,
           users: [{ name: $name, uuid: $uuid, password: $password }],
           congestion_control: "bbr",
-          zero_rtt_handshake: false,
+          zero_rtt_handshake: $zero_rtt,
           heartbeat: "10s",
           tls: {
             enabled: true,
@@ -331,12 +390,15 @@ render_inbound_for_tag() {
       --arg username "$username" \
       --arg password "$password" \
       --argjson port "$port" \
-      --argjson tfo "${__tfo}" '{
+      --argjson tfo "${__tfo}" \
+      --arg tka_iv "${__tka_iv}" '{
           type: "socks",
           tag: $tag,
           listen: "::",
           listen_port: $port,
           tcp_fast_open: $tfo,
+          tcp_keep_alive: true,
+          tcp_keep_alive_interval: $tka_iv,
           users: [{ username: $username, password: $password }]
         }'
     ;;

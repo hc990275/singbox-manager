@@ -238,8 +238,9 @@ EOF
 [Unit]
 Description=Run Singbox Manager Watchdog Every Minute
 
+# C1：开机首检 90s→30s（端口探活并行后单轮足够快，提前拉起可缩短故障窗口）
 [Timer]
-OnBootSec=90
+OnBootSec=30
 OnUnitActiveSec=60
 Unit=${WATCHDOG_SERVICE_NAME}.service
 

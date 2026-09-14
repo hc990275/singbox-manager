@@ -412,6 +412,59 @@ assert_eval_true "HY2 限速时写 up_mbps=400" 'jq -e ".up_mbps == 400" "${tmpc
 assert_eval_true "HY2 限速时写 down_mbps=800" 'jq -e ".down_mbps == 800" "${tmpcfg}" >/dev/null'
 rm -f "${tmpcfg}"
 
+# --- B1：TUIC 0-RTT（默认开启；tuic_zero_rtt=0 关闭；不携带 TCP keepalive 字段） ---
+json_set_record "${NODES_FILE}" "ntic" '{"protocol":"tuic-v5","name":"TUIC-ZRTT","port":10111,"tls_server":"www.bing.com","certificate_mode":"self-signed"}'
+json_set_record "${SECRETS_FILE}" "ntic" '{"uuid":"uz","password":"pz"}'
+tmpcfg="$(mktemp "${TEST_ROOT}/cfg.XXXXXX")"
+render_inbound_for_tag ntic >"${tmpcfg}" 2>/dev/null
+assert_eval_true "B1 TUIC 默认 zero_rtt=true" 'jq -e ".zero_rtt_handshake == true and .congestion_control == \"bbr\"" "${tmpcfg}" >/dev/null'
+assert_eval_true "B1 TUIC 不携带 TCP keepalive 字段" 'jq -e "has(\"tcp_keep_alive\") | not" "${tmpcfg}" >/dev/null'
+tuic_zero_rtt=0 render_inbound_for_tag ntic >"${tmpcfg}" 2>/dev/null
+assert_eval_true "B1 tuic_zero_rtt=0 关闭 0-RTT" 'jq -e ".zero_rtt_handshake == false" "${tmpcfg}" >/dev/null'
+rm -f "${tmpcfg}"
+
+# --- B3：TCP keepalive 显式化（默认 30s；interval 可调；非法回退） ---
+tmpcfg="$(mktemp "${TEST_ROOT}/cfg.XXXXXX")"
+render_inbound_for_tag nws-tune >"${tmpcfg}" 2>/dev/null
+assert_eval_true "B3 WS-TLS 默认 keepalive=true/30s" 'jq -e ".tcp_keep_alive == true and .tcp_keep_alive_interval == \"30s\"" "${tmpcfg}" >/dev/null'
+tcp_keep_alive_interval=15s render_inbound_for_tag nws-tune >"${tmpcfg}" 2>/dev/null
+assert_eval_true "B3 tcp_keep_alive_interval 可调" 'jq -e ".tcp_keep_alive_interval == \"15s\"" "${tmpcfg}" >/dev/null'
+tcp_keep_alive_interval=abc render_inbound_for_tag nws-tune >"${tmpcfg}" 2>/dev/null
+assert_eval_true "B3 非法间隔回退 30s" 'jq -e ".tcp_keep_alive_interval == \"30s\"" "${tmpcfg}" >/dev/null'
+rm -f "${tmpcfg}"
+
+# --- B4：DNS 块开关（默认关闭；dns_servers 渲染；非法 scheme 不渲染） ---
+# 注意：env 赋值一律用“前缀+命令”形式，避免 eval 在顶层残留变量污染后续 render_config
+assert_eq "B4 dns_servers 空 => {}" "{}" "$(render_dns_object)"
+assert_eval_true "B4 dns_servers 双源渲染 dns 块" '( dns_servers="https://1.1.1.1/dns-query,https://dns.google/resolve" render_dns_object ) | jq -e "(.dns.servers | length) == 2 and .dns.independent_cache == true and .dns.strategy == \"ipv4_only\""'
+assert_eq "B4 非法 scheme 不渲染" "{}" "$(dns_servers='http://plain' render_dns_object)"
+assert_eq "B4 混入非法源整体不渲染" "{}" "$(dns_servers='https://1.1.1.1/dns-query,ftp://bad' render_dns_object)"
+
+# --- A2：并行端口探活（桩函数：存活端口=11111 置于最后；死端口 sleep 超时后失败） ---
+assert_eval_true "A2 并行探活：存活端口在最后仍快速返回真（串行≈2s/并行≈1s）" '
+  ( probe_tcp_port() { [ "$2" = "11111" ] && return 0; sleep "${3:-2}"; return 1; }
+    iter_node_tags() { printf "pa\npb\npc\n"; }
+    node_value() { [ "$2" = "port" ] || return 1; case "$1" in pa|pb) printf "22222" ;; pc) printf "11111" ;; *) return 1 ;; esac; }
+    SBM_PROBE_TIMEOUT_S=1
+    SECONDS=0
+    if any_node_port_alive; then rc=0; else rc=1; fi
+    printf "rc=%s wall=%s" "$rc" "$SECONDS" ) | grep -qxE "rc=0 wall=[01]"
+'
+assert_eval_false "A2 并行探活：全部死端口快速失败" '
+  ( probe_tcp_port() { sleep "${3:-2}"; return 1; }
+    iter_node_tags() { printf "pa\npb\n"; }
+    node_value() { [ "$2" = "port" ] || return 1; printf "22222"; }
+    SBM_PROBE_TIMEOUT_S=1
+    if any_node_port_alive; then exit 0; else exit 1; fi )
+'
+assert_eval_true "A2 串行回退：存活端口返回真" '
+  ( probe_tcp_port() { [ "$2" = "11111" ] && return 0; sleep "${3:-2}"; return 1; }
+    iter_node_tags() { printf "pa\npb\n"; }
+    node_value() { [ "$2" = "port" ] || return 1; case "$1" in pb) printf "11111" ;; *) printf "22222" ;; esac; }
+    SBM_PROBE_PARALLEL=0
+    if any_node_port_alive; then exit 0; else exit 1; fi )
+'
+
 # v1.2.4：CDN 模式采用 CF 证书方案（Full/Full-Strict 回源）——源站仅渲染 TLS WS inbound（wspt 统一单端口），
 # 旧 ws_cdn_origin_port（明文 HTTP 回源）已废弃：即使节点记录里残留该字段也忽略，不再追加明文 inbound。
 json_set_record "${NODES_FILE}" "nws-cdnextra" '{"protocol":"vless-ws-tls","name":"WS-CDNX","port":20844,"preferred_domain":"cdn.example.com","host_domain":"ws.example.com","ws_path":"/x","certificate_mode":"custom","ws_mode":"cdn","cdn_port":443,"ws_cdn_origin_port":80}'
@@ -544,6 +597,8 @@ assert_eval_true "anytls TFO 默认开" 'jq -e ".inbounds[] | select(.type == \"
 assert_eval_true "socks TFO 默认开" 'jq -e ".inbounds[] | select(.type == \"socks\" and .tcp_fast_open == true)" "${CONFIG_FILE}" >/dev/null'
 assert_eval_true "WS inbound 全局带 0-RTT" 'jq -e ".inbounds[] | select(.transport.type? == \"ws\" and .transport.max_early_data == 2048 and .transport.early_data_header_name == \"Sec-WebSocket-Protocol\")" "${CONFIG_FILE}" >/dev/null'
 assert_eval_true "HY2 限速 100/300 写入" 'jq -e ".inbounds[] | select(.type == \"hysteria2\" and .up_mbps == 100 and .down_mbps == 300)" "${CONFIG_FILE}" >/dev/null'
+assert_eval_true "TUIC inbound 默认 0-RTT" 'jq -e ".inbounds[] | select(.type == \"tuic\" and .zero_rtt_handshake == true)" "${CONFIG_FILE}" >/dev/null'
+assert_eval_true "socks inbound 默认 keepalive 30s" 'jq -e ".inbounds[] | select(.type == \"socks\" and .tcp_keep_alive == true and .tcp_keep_alive_interval == \"30s\")" "${CONFIG_FILE}" >/dev/null'
 # stub 进程存活仅对"纯进程托管"环境有意义：systemd/openrc 下 sing-box 由系统管理器
 # 托管且不写 PID 文件（GitHub 托管 runner 即 systemd 环境），断言按环境跳过。
 if ! systemd_available && ! openrc_available; then
@@ -568,6 +623,12 @@ fi
 cp "${CONFIG_FILE}" "${TEST_ROOT}/config.before"
 assert_eval_false "check 失败 render_config 拒写" '( SINGBOX_BIN="/bin/false"; render_config )'
 assert_eval_true "check 失败保留旧配置" 'cmp -s "${CONFIG_FILE}" "${TEST_ROOT}/config.before"'
+
+# B4：DNS 块开关 e2e（默认 config 无 dns；dns_servers 开启后渲染 dns 块；关闭后还原）
+assert_eval_true "默认 config 无 DNS 块" 'jq -e "has(\"dns\") | not" "${CONFIG_FILE}" >/dev/null'
+assert_eval_true "DNS 开关开启后渲染 dns 块" 'dns_servers="https://1.1.1.1/dns-query" render_config; jq -e "(.dns.servers | length) == 1 and .dns.independent_cache == true and .dns.strategy == \"ipv4_only\"" "${CONFIG_FILE}" >/dev/null'
+dns_servers="" render_config
+assert_eval_true "关闭 DNS 后还原无 dns 块" 'jq -e "has(\"dns\") | not" "${CONFIG_FILE}" >/dev/null'
 
 # sbm sub：base64 订阅输出（6 节点）
 assert_eval_true "sub 输出非空 base64" 'c="$(sub_command)"; [ "${#c}" -gt 100 ] && [[ "${c}" =~ ^[A-Za-z0-9+/=]+$ ]]'
