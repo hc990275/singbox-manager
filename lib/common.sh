@@ -445,6 +445,14 @@ url_encode() {
   jq -nr --arg s "$1" '$s|@uri'
 }
 
+# 批量 @uri 编码：一次 jq 子进程编码整组值，输出逐行一个（@uri 会把换行编码为 %0A，
+# 不会产生裸换行 ⇒ 行分隔读取安全）。用于 build_share_link 等每次链接"多字段各一个
+# url_encode(jq fork)"的热点，把每节点 N 个 jq 子进程合并为 1 个（list/sub 每节点省
+# N-1 次 fork）。
+url_encode_many() {
+  jq -nr --args '$ARGS.positional[] | @uri' "$@"
+}
+
 # 域名/SNI 输入白名单：字母数字 . _ : -（冒号用于 IPv6），拒绝空格与 URI 特殊字符
 is_safe_domain() {
   local value="$1"
@@ -1561,11 +1569,12 @@ build_share_link() {
 
   case "$protocol" in
   vless-reality)
-    reality_server="$(url_encode "${reality_server}")"
-    public_key="$(url_encode "${public_key}")"
-    short_id="$(url_encode "${short_id}")"
+    # 批量 url_encode：4 个字段一次 jq 子进程（原逐字段 url_encode 每字段一个 jq fork）
+    { read -r reality_server; read -r public_key; read -r short_id; read -r name; } <<EOF
+$(url_encode_many "${reality_server}" "${public_key}" "${short_id}" "${name}")
+EOF
     printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s' \
-      "$uuid" "$host" "$port" "$reality_server" "$public_key" "$short_id" "$(url_encode "$name")"
+      "$uuid" "$host" "$port" "$reality_server" "$public_key" "$short_id" "$name"
     ;;
   vless-ws-tls)
     ws_mode="${ws_mode:-direct}"
@@ -1576,14 +1585,22 @@ build_share_link() {
       if [ -z "${preferred_domain}" ] || [ "${preferred_domain}" = "${DEFAULT_CDN_DOMAIN}" ]; then
         print_warn "WS-TLS 节点 ${tag} 使用默认优选域名 ${DEFAULT_CDN_DOMAIN}：仅当该域名已接入本机前置 CDN 时可用，否则请把 cdn_host 设为你自己的域名或改用 ws_mode=direct 直连。"
       fi
-      printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s' \
+      cdn_sni="${cdn_sni:-${preferred_domain}}"
+      # 批量编码 cdn_sni×2 + ws_path + name（原每字段一个 url_encode=1 jq 子进程）
+      { read -r cdn_sni_enc; read -r cdn_sni_enc2; read -r ws_path_enc; read -r name_enc; } <<EOF
+$(url_encode_many "${cdn_sni}" "${cdn_sni}" "${ws_path}" "${name}")
+EOF
+      printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s#%s' \
         "$uuid" "$(wrap_host "$preferred_domain")" "$cdn_port" \
-        "$(url_encode "${cdn_sni:-${preferred_domain}}")" "$(url_encode "${cdn_sni:-${preferred_domain}}")" "$(url_encode "$ws_path")"
+        "${cdn_sni_enc}" "${cdn_sni_enc2}" "${ws_path_enc}" "${name_enc}"
     else
-      # 直连模式：客户端连服务器 IP + wspt，SNI/Host 走 WS Host 域名（自签证书跳过校验）
-      printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s' \
-        "$uuid" "$host" "$port" \
-        "$(url_encode "$host_domain")" "$(url_encode "$host_domain")" "$(url_encode "$ws_path")"
+      # 直连模式：客户端连服务器 IP + wspt，SNI/Host 均走 WS Host 域名（自签证书跳过校验）
+      # 批量编码 host_domain×2（sni+host）+ ws_path + name（一次 jq 子进程）
+      { read -r sni_enc; read -r host_enc; read -r ws_path_enc; read -r name_enc; } <<EOF
+$(url_encode_many "${host_domain}" "${host_domain}" "${ws_path}" "${name}")
+EOF
+      printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s#%s' \
+        "$uuid" "$host" "$port" "${sni_enc}" "${host_enc}" "${ws_path_enc}" "${name_enc}"
     fi
     # 自签证书固定指纹仅在直连模式有意义：客户端直连本机、面对的就是该自签证书。
     # CDN 模式客户端面对的是前置 CDN（如 Cloudflare）边缘的公开证书，不能固定源站自签指纹，否则必然校验失败。
@@ -1600,6 +1617,10 @@ build_share_link() {
     printf '#%s' "$(url_encode "$name")"
     ;;
   anytls)
+    # 批量编码 password + name（一次 jq 子进程，原逐字段 2 fork）
+    { read -r password_enc; read -r name_enc; } <<EOF
+$(url_encode_many "${password}" "${name}")
+EOF
     tls_server="$(url_encode "${tls_server}")"
     # 自签证书：insecure=1 跳过校验；type/headerType 声明 TCP 传输，兼容主流客户端解析
     if [ "$cert_mode" = "self-signed" ]; then
@@ -1608,8 +1629,8 @@ build_share_link() {
       ext=""
     fi
     printf 'anytls://%s@%s:%s?%ssecurity=tls&sni=%s&type=tcp&headerType=none' \
-      "$(url_encode "$password")" "$host" "$port" "$ext" "$tls_server"
-    printf '#%s' "$(url_encode "$name")"
+      "${password_enc}" "$host" "$port" "$ext" "$tls_server"
+    printf '#%s' "${name_enc}"
     ;;
   vless-argo)
     cdn_port="${cdn_port:-443}"
