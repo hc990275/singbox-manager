@@ -7,7 +7,7 @@ set -eEuo pipefail
 umask 077
 
 PROJECT_NAME="Singbox 管理器"
-SCRIPT_VERSION="1.3.2"
+SCRIPT_VERSION="1.4.0"
 REPO_OWNER="hynize"
 REPO_NAME="singbox-manager"
 
@@ -34,15 +34,15 @@ DEFAULT_TLS_SERVER="www.apple.com"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_ROOT=""
-if [ -f "${SCRIPT_DIR}/lib/common.sh" ]; then
+if [ -f "${SCRIPT_DIR}/lib/env.sh" ]; then
   SOURCE_ROOT="${SCRIPT_DIR}"
-  # shellcheck source=lib/common.sh
-  . "${SCRIPT_DIR}/lib/common.sh"
-elif [ -f "${LIB_DIR}/common.sh" ]; then
-  # shellcheck source=/usr/local/lib/singbox-manager/common.sh
-  . "${LIB_DIR}/common.sh"
+  # shellcheck source=lib/env.sh
+  . "${SCRIPT_DIR}/lib/env.sh"
+elif [ -f "${LIB_DIR}/env.sh" ]; then
+  # shellcheck source=/usr/local/lib/singbox-manager/env.sh
+  . "${LIB_DIR}/env.sh"
 else
-  echo "未找到 common.sh。" >&2
+  echo "未找到 env.sh。" >&2
   exit 1
 fi
 
@@ -59,78 +59,10 @@ fi
 require_bash4
 setup_common_traps
 
-has_systemd=false
-has_openrc=false
-
-# 职责模块（lib/*.sh）：开发态先找 SCRIPT_DIR/lib，安装态回退 LIB_DIR
-for _sbm_module in ui core nodes menu; do
-  if [ -f "${SCRIPT_DIR}/lib/${_sbm_module}.sh" ]; then
-    # shellcheck source=lib/${_sbm_module}.sh
-    . "${SCRIPT_DIR}/lib/${_sbm_module}.sh"
-  elif [ -f "${LIB_DIR}/${_sbm_module}.sh" ]; then
-    # shellcheck source=lib/${_sbm_module}.sh
-    . "${LIB_DIR}/${_sbm_module}.sh"
-  else
-    fatal "未找到 lib/${_sbm_module}.sh。"
-  fi
-done
-unset _sbm_module
-main() {
-  local action="${1:-}"
-  case "${action}" in
-  "")
-    require_root
-    # 菜单内任何非零返回（如 stdin EOF）都以干净状态退出，不触发 ERR trap
-    main_menu || exit 0
-    ;;
-  rep | ins)
-    require_root
-    auto_install "${action}"
-    ;;
-  list)
-    require_root
-    init_storage
-    echo
-    print_node_list
-    echo
-    ;;
-  sub)
-    require_root
-    sub_command "${2:-}"
-    ;;
-  delall)
-    require_root
-    delete_all_nodes
-    ;;
-  restore)
-    require_root
-    init_storage
-    acquire_lock
-    if restore_latest_backup; then
-      reconcile_state || true
-      render_config
-      start_service
-      print_ok "已恢复并重启服务。"
-    fi
-    release_lock
-    ;;
-  un)
-    require_root
-    if uninstall_project; then
-      exit 0
-    fi
-    exit 1
-    ;;
-  -h | --help | help)
-    print_cli_usage
-    ;;
-  *)
-    print_warn "未知命令：${action}"
-    print_cli_usage
-    exit 1
-    ;;
-  esac
-}
+# 职责模块（lib/*.sh）：开发态先找 SCRIPT_DIR/lib，安装态回退 LIB_DIR（顺序见 SBM_MODULES）
+if ! sbm_load_all; then
+  exit 1
+fi
 
 if [ "${SBM_TEST_MODE:-0}" != "1" ]; then
   # 测试钩子：SBM_TEST_MODE=1 时供 tests/smoke.sh source 本文件做函数级验证

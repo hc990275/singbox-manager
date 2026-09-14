@@ -64,6 +64,28 @@ esac
 # shellcheck source=../sb.sh
 source "${ROOT_DIR}/sb.sh"
 
+# --- 模块分组索引（对应 docs/ARCHITECTURE.md 的 lib/*.sh 分层） ---
+# env       : 前置检查/陷阱（隐含：sb.sh 加载即验证）；normalize_input 依赖的变量
+# fmt       : normalize_input / env_var / IP 工具 / IPv6 authority 编码
+# io        : 下载校验（本环境不联网，经 jq/openssl 边缘用例间接覆盖）
+# storage   : 存储初始化 / JSON 读写 / 备份恢复 / 崩溃对账 / wipe / 日志轮转 / PID 文件 / 文件锁
+# settings  : 全局设置读写
+# network   : 端口占用快照 / 端口探活
+# cert      : 自签证书与回退 / 指纹
+# render    : node_meta 批量字段 / Reality / WS-TLS / AnyTLS / HY2 渲染（单 outbound 校验）
+# links     : 分享链接 / 参数编码 / url 编码
+# node-add  : add_* 交互入库（经由 node_bundle 事务）
+# node-spec : 环境变量规格收集（auto_collect_specs 等）
+# node-auto : auto_add_* 记录字段 / 环境变量自动安装
+# node-cmd  : CLI 用法输出 / list / sub / 清理
+# argo      : vless_argo 链接与临时域名（网络依赖场景显式跳过）
+# tune      : GOGC / 智能 buffer 档位 / net_tune 开关
+# speedtest : 测速下载地址解析（不实际下载）
+# service   : PID→二进制身份校验 / GOMEMLIMIT 计算 / 进程托管断言（按环境跳过）
+# install   : 端到端安装编排（SINGBOX/CLOUDFLARED 二进制 stub）
+# menu/cli  : main 命令分发（SBM_TEST_MODE 下不直接执行，由各命令函数覆盖）
+# -------------------------------------------------------------------------
+
 # --- normalize_input ---
 assert_eq "normalize_input 去首尾空白" "hello" "$(normalize_input "  hello  ")"
 assert_eq "normalize_input 删除控制字符" "abcd" "$(normalize_input "$(printf 'ab\tc\rd')")"
@@ -524,9 +546,7 @@ assert_eval_true "WS inbound 全局带 0-RTT" 'jq -e ".inbounds[] | select(.tran
 assert_eval_true "HY2 限速 100/300 写入" 'jq -e ".inbounds[] | select(.type == \"hysteria2\" and .up_mbps == 100 and .down_mbps == 300)" "${CONFIG_FILE}" >/dev/null'
 # stub 进程存活仅对"纯进程托管"环境有意义：systemd/openrc 下 sing-box 由系统管理器
 # 托管且不写 PID 文件（GitHub 托管 runner 即 systemd 环境），断言按环境跳过。
-detect_systemd
-# shellcheck disable=SC2154  # has_systemd/has_openrc 由 detect_systemd 赋值
-if [ "${has_systemd}" = false ] && [ "${has_openrc}" = false ]; then
+if ! systemd_available && ! openrc_available; then
   _stub_pid="$(read_pid_file "${PID_FILE}" 2>/dev/null || true)"
   if [ -n "${_stub_pid}" ] && kill -0 "${_stub_pid}" 2>/dev/null; then
     PASS=$((PASS + 1))
@@ -541,7 +561,7 @@ if [ "${has_systemd}" = false ] && [ "${has_openrc}" = false ]; then
     pgrep -af "sing-box|sleep 300" 2>&1 | sed 's/^/  pgrep: /' >&2 || true
   fi
 else
-  printf '[提示] has_systemd=%s has_openrc=%s：跳过 stub 进程存活断言\n' "${has_systemd}" "${has_openrc}" >&2
+  printf '[提示] systemd/openrc 托管环境：跳过 stub 进程存活断言\n' >&2
 fi
 
 # S4：sing-box check 失败时拒写配置（fail-closed，保留旧配置）

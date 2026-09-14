@@ -112,7 +112,7 @@ MTProxy 与 sing-box 互不依赖：卸载其中一方不影响另一方；`sbm 
 ## 项目结构
 
 ```text
-sb.sh / mtp.sh / install.sh / lib/common.sh / metadata/upstream.env
+sb.sh / mtp.sh / install.sh / lib/*.sh / metadata/upstream.env
 scripts/watchdog.sh          保活（systemd timer 或 cron，每分钟）
 scripts/build-release-bundle.sh
 interface/                   网页命令生成器（Pages / Workers 部署）

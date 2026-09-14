@@ -5,10 +5,10 @@ umask 077
 
 REPO_OWNER="hynize"
 REPO_NAME="singbox-manager"
-PROJECT_VERSION="v1.3.2"
-PACKAGE_NAME="singbox-manager-v1.3.2.tar.gz"
+PROJECT_VERSION="v1.4.0"
+PACKAGE_NAME="singbox-manager-v1.4.0.tar.gz"
 # 发布流程：scripts/build-release-bundle.sh 构建可复现 bundle，其 SHA256 与此处一致
-PACKAGE_SHA256="5aeed9b2346eef099ba8edf4699ea6c7eb49e180f0ded8fe946f46ae29260429"
+PACKAGE_SHA256="6117840bd73e486bcf2f5536d2b2b7791d845be604a1671239c70805347e3f63"
 PACKAGE_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${PROJECT_VERSION}/${PACKAGE_NAME}"
 
 INSTALL_BIN="/usr/local/bin/sbm"
@@ -17,7 +17,6 @@ LIB_DIR="/usr/local/lib/singbox-manager"
 BASE_DIR="/usr/local/etc/singbox-manager"
 WATCHDOG_PATH="${BASE_DIR}/watchdog.sh"
 UPSTREAM_ENV="${LIB_DIR}/upstream.env"
-COMMON_LIB="${LIB_DIR}/common.sh"
 
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
   echo "请使用 root 用户运行。" >&2
@@ -74,8 +73,8 @@ install_bundle() {
   fi
 
   # 安装前校验候选脚本语法，避免半写入造成混装
-  for sbm_module in ui core nodes menu; do
-    if ! bash -n "${root_dir}/sb.sh" || ! bash -n "${root_dir}/mtp.sh" || ! bash -n "${root_dir}/lib/common.sh" || ! bash -n "${root_dir}/lib/${sbm_module}.sh" || ! bash -n "${root_dir}/scripts/watchdog.sh"; then
+  for lib_file in "${root_dir}"/lib/*.sh; do
+    if ! bash -n "${root_dir}/sb.sh" || ! bash -n "${root_dir}/mtp.sh" || ! bash -n "$lib_file" || ! bash -n "${root_dir}/scripts/watchdog.sh"; then
       rm -rf "$tmpdir"
       echo "发布包脚本语法校验失败，已取消安装。" >&2
       exit 1
@@ -84,9 +83,8 @@ install_bundle() {
 
   install -d -m 700 "$LIB_DIR" "$BASE_DIR"
   # 先装共享库与 watchdog，最后装入口 sbm
-  install -m 0644 "${root_dir}/lib/common.sh" "${COMMON_LIB}"
-  for sbm_module in ui core nodes menu; do
-    install -m 0644 "${root_dir}/lib/${sbm_module}.sh" "${LIB_DIR}/${sbm_module}.sh"
+  for lib_file in "${root_dir}"/lib/*.sh; do
+    install -m 0644 "$lib_file" "${LIB_DIR}/$(basename "$lib_file")"
   done
   install -m 0644 "${root_dir}/metadata/upstream.env" "${UPSTREAM_ENV}"
   install -m 0755 "${root_dir}/scripts/watchdog.sh" "${WATCHDOG_PATH}"
@@ -94,9 +92,9 @@ install_bundle() {
   install -m 0755 "${root_dir}/mtp.sh" "${MTP_BIN}"
 
   chmod 0755 "${INSTALL_BIN}" "${WATCHDOG_PATH}" "${MTP_BIN}"
-  chmod 0644 "${COMMON_LIB}" "${UPSTREAM_ENV}"
-  for sbm_module in ui core nodes menu; do
-    chmod 0644 "${LIB_DIR}/${sbm_module}.sh"
+  chmod 0644 "${UPSTREAM_ENV}"
+  for lib_file in "${LIB_DIR}"/*.sh; do
+    chmod 0644 "$lib_file"
   done
   rm -rf "$tmpdir"
 }

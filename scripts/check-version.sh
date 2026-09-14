@@ -19,6 +19,25 @@ version_install="$(grep -m1 '^PROJECT_VERSION=' install.sh | sed 's/.*v//; s/"$/
 [ "${version_file}" = "${version_mtp}" ] || fail "VERSION(${version_file}) 与 mtp.sh SCRIPT_VERSION(${version_mtp}) 不一致"
 [ "${version_file}" = "${version_install}" ] || fail "VERSION(${version_file}) 与 install.sh PROJECT_VERSION(${version_install}) 不一致"
 
+# 模块清单校验：SBM_MODULES(lib/env.sh) 必须与 lib/*.sh 严格一一对应且去重，
+# 顺序以 env.sh 为准（首个必须为 env），防止新增/删除模块时漏维护清单或乱序。
+modules_line="$(grep -oE '^SBM_MODULES=\([^)]*\)' lib/env.sh | head -n1)"
+[ -n "${modules_line}" ] || fail "lib/env.sh 缺少 SBM_MODULES 声明"
+modules="$(printf '%s' "${modules_line}" | sed 's/^SBM_MODULES=(//; s/)$//')"
+[ -z "${modules}" ] && fail "SBM_MODULES 为空"
+read -r -a module_arr <<<"${modules}"
+dup="$(printf '%s\n' "${module_arr[@]}" | sort | uniq -d | tr '\n' ' ')"
+[ -z "${dup}" ] || fail "SBM_MODULES 存在重复模块：${dup}"
+[ "${module_arr[0]}" = "env" ] || fail "SBM_MODULES 首个模块必须为 env（当前：${module_arr[0]}）"
+for m in "${module_arr[@]}"; do
+  [ -f "lib/${m}.sh" ] || fail "SBM_MODULES 声明了 ${m}，但缺少 lib/${m}.sh"
+  bash -n "lib/${m}.sh" || fail "lib/${m}.sh 语法错误"
+done
+for f in lib/*.sh; do
+  b="$(basename "$f" .sh)"
+  printf '%s\n' "${module_arr[@]}" | grep -qx "${b}" || fail "lib/${b}.sh 未在 SBM_MODULES 中声明"
+done
+
 # README / interface 的安装入口必须指向 releases/latest，不得钉死版本号，
 # 防止用户照文档装到旧版（v0.2.11 事故）
 if grep -qE 'releases/download/v[0-9]+\.[0-9]+\.[0-9]+' README.md; then

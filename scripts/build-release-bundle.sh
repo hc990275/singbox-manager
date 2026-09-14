@@ -13,9 +13,8 @@ mkdir -p "${PACKAGE_DIR}" "${DIST_DIR}"
 install -m 0755 "${ROOT_DIR}/sb.sh" "${PACKAGE_DIR}/sb.sh"
 install -m 0755 "${ROOT_DIR}/mtp.sh" "${PACKAGE_DIR}/mtp.sh"
 install -d -m 0755 "${PACKAGE_DIR}/lib" "${PACKAGE_DIR}/metadata" "${PACKAGE_DIR}/scripts"
-install -m 0644 "${ROOT_DIR}/lib/common.sh" "${PACKAGE_DIR}/lib/common.sh"
-for sbm_module in ui core nodes menu; do
-  install -m 0644 "${ROOT_DIR}/lib/${sbm_module}.sh" "${PACKAGE_DIR}/lib/${sbm_module}.sh"
+for lib_file in "${ROOT_DIR}"/lib/*.sh; do
+  install -m 0644 "$lib_file" "${PACKAGE_DIR}/lib/$(basename "$lib_file")"
 done
 install -m 0644 "${ROOT_DIR}/metadata/upstream.env" "${PACKAGE_DIR}/metadata/upstream.env"
 install -m 0755 "${ROOT_DIR}/scripts/watchdog.sh" "${PACKAGE_DIR}/scripts/watchdog.sh"

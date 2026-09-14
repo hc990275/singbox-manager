@@ -14,24 +14,25 @@ SERVICE_NAME="singbox-manager"
 PID_FILE="${RUNTIME_DIR}/sing-box.pid"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "${LIB_DIR}/common.sh" ]; then
-  # shellcheck source=../lib/common.sh
-  . "${LIB_DIR}/common.sh"
+SOURCE_ROOT=""
+if [ -f "${SCRIPT_DIR}/../lib/env.sh" ]; then
+  SOURCE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+  # shellcheck source=../lib/env.sh
+  . "${SCRIPT_DIR}/../lib/env.sh"
+elif [ -f "${LIB_DIR}/env.sh" ]; then
+  # shellcheck source=/usr/local/lib/singbox-manager/env.sh
+  . "${LIB_DIR}/env.sh"
 else
-  # shellcheck source=../lib/common.sh
-  . "${SCRIPT_DIR}/../lib/common.sh"
+  echo "未找到 env.sh。" >&2
+  exit 1
+fi
+
+if ! sbm_load_all; then
+  exit 1
 fi
 
 require_bash4
 setup_common_traps
-
-has_systemd=false
-has_openrc=false
-if command_exists systemctl && [ -d /run/systemd/system ]; then
-  has_systemd=true
-elif command_exists rc-service && [ -x /sbin/openrc-run ]; then
-  has_openrc=true
-fi
 
 start_non_systemd_singbox() {
   if [ ! -x "${SINGBOX_BIN}" ] || [ ! -f "${CONFIG_FILE}" ]; then
@@ -77,14 +78,14 @@ ensure_singbox() {
     return 0
   fi
 
-  if [ "${has_systemd}" = true ]; then
+  if systemd_available; then
     if ! systemctl is-active --quiet "${SERVICE_NAME}"; then
       systemctl restart "${SERVICE_NAME}" >/dev/null 2>&1 || true
     fi
     return 0
   fi
 
-  if [ "${has_openrc}" = true ]; then
+  if openrc_available; then
     if ! rc-service "${SERVICE_NAME}" status >/dev/null 2>&1; then
       kill_pid_file "${PID_FILE}" "${SINGBOX_BIN}"
       rc-service "${SERVICE_NAME}" restart >/dev/null 2>&1 || rc-service "${SERVICE_NAME}" start >/dev/null 2>&1 || true

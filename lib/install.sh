@@ -3,31 +3,6 @@ set -eEuo pipefail
 
 umask 077
 
-# 本文件由 sb.sh 模块拆分生成：函数自原 sb.sh 原样迁出（见各自函数上方注释）。
-# 依赖 lib/common.sh 提供的基础函数与全局变量，须在 common.sh 之后被 source。
-detect_systemd() {
-  has_systemd=false
-  has_openrc=false
-
-  if command_exists systemctl && [ -d /run/systemd/system ]; then
-    has_systemd=true
-  elif command_exists rc-service && [ -x /sbin/openrc-run ]; then
-    has_openrc=true
-  fi
-}
-
-# 守护 timer 是否真正处于"等待下一次触发"的调度态。
-# 不能用 `systemctl is-active` 判定 timer：timer 单元只要被 load 就显示 active，
-# 无法区分"已 enable 且等待"与"已 disable/无法触发"。改为查 list-timers 的
-# NEXT 列：非 n/a（已有下一次触发计划）才算生效。
-systemd_timer_active() {
-  local line
-  line="$(systemctl list-timers --all --no-legend "${WATCHDOG_TIMER_NAME}" 2>/dev/null | head -n 1 || true)"
-  [ -n "${line}" ] || return 1
-  [[ "${line}" == n/a* ]] && return 1
-  return 0
-}
-
 detect_arch() {
   case "$(uname -m)" in
   x86_64 | amd64) printf 'amd64' ;;
@@ -60,9 +35,9 @@ pkg_install() {
 
 required_commands() {
   printf '%s\n' curl tar jq openssl awk sed grep find head mktemp install nohup tr hostname kill rm mv chmod cat cp
-  if [ "${has_systemd}" = true ]; then
+  if systemd_available; then
     printf '%s\n' systemctl
-  elif [ "${has_openrc}" = true ]; then
+  elif openrc_available; then
     printf '%s\n' rc-service rc-update
   fi
 }
@@ -137,9 +112,8 @@ sync_project_assets_from_source() {
   init_storage
   install -d -m 700 "${LIB_DIR}" "${BASE_DIR}"
   install -m 0755 "${SOURCE_ROOT}/sb.sh" "${INSTALL_BIN}"
-  install -m 0644 "${SOURCE_ROOT}/lib/common.sh" "${LIB_DIR}/common.sh"
-  for sbm_module in ui core nodes menu; do
-    install -m 0644 "${SOURCE_ROOT}/lib/${sbm_module}.sh" "${LIB_DIR}/${sbm_module}.sh"
+  for lib_file in "${SOURCE_ROOT}"/lib/*.sh; do
+    install -m 0644 "$lib_file" "${LIB_DIR}/$(basename "$lib_file")"
   done
   install -m 0644 "${SOURCE_ROOT}/metadata/upstream.env" "${UPSTREAM_ENV}"
   install -m 0755 "${SOURCE_ROOT}/scripts/watchdog.sh" "${WATCHDOG_TARGET}"
@@ -179,20 +153,21 @@ install_release_bundle() {
   }
 
   # 安装前先校验候选脚本，避免中断/半写入造成新旧版本混装
-  if ! bash -n "${root_dir}/sb.sh" || ! bash -n "${root_dir}/lib/common.sh" || ! bash -n "${root_dir}/scripts/watchdog.sh"; then
+  if ! bash -n "${root_dir}/sb.sh" || ! bash -n "${root_dir}/scripts/watchdog.sh"; then
     rm -rf "${tmpdir}"
     fatal "发布包脚本语法校验失败，已取消安装（原文件未改动）。"
   fi
-
-  install -d -m 700 "${LIB_DIR}" "${BASE_DIR}"
-  # 先装共享库与 watchdog，最后装入口 sbm，保证入口加载到配套实现
-  install -m 0644 "${root_dir}/lib/common.sh" "${LIB_DIR}/common.sh"
-  for sbm_module in ui core nodes menu; do
-    if ! bash -n "${root_dir}/lib/${sbm_module}.sh"; then
+  for lib_file in "${root_dir}"/lib/*.sh; do
+    if ! bash -n "$lib_file"; then
       rm -rf "${tmpdir}"
       fatal "发布包脚本语法校验失败，已取消安装（原文件未改动）。"
     fi
-    install -m 0644 "${root_dir}/lib/${sbm_module}.sh" "${LIB_DIR}/${sbm_module}.sh"
+  done
+
+  install -d -m 700 "${LIB_DIR}" "${BASE_DIR}"
+  # 先装共享库与 watchdog，最后装入口 sbm，保证入口加载到配套实现
+  for lib_file in "${root_dir}"/lib/*.sh; do
+    install -m 0644 "$lib_file" "${LIB_DIR}/$(basename "$lib_file")"
   done
   install -m 0644 "${root_dir}/metadata/upstream.env" "${UPSTREAM_ENV}"
   install -m 0755 "${root_dir}/scripts/watchdog.sh" "${WATCHDOG_TARGET}"
@@ -316,263 +291,7 @@ install_cloudflared_bin() {
   print_ok "cloudflared 已安装到 ${CLOUDFLARED_BIN}（${version}，校验：${verify_mode}）"
 }
 
-create_systemd_units() {
-  local mem_line=""
-  local mem_limit gogc_line memory_high_line memory_max_line nofile_line
-  local mem_high mem_max
-  mem_limit="$(go_mem_limit_value)"
-  if [ -n "${mem_limit}" ]; then
-    mem_line="Environment=GOMEMLIMIT=${mem_limit}"
-  fi
-  # P5：GOGC=off 彻底关闭逃逸堆目标（可选）；MemoryHigh/MemoryMax 软硬内存上限（可选）
-  gogc_line=""
-  if go_gc_requested; then
-    gogc_line="Environment=GOGC=off"
-  fi
-  mem_high="$(manager_env_or_setting "mem_high_mb")"
-  mem_max="$(manager_env_or_setting "mem_max_mb")"
-  memory_high_line=""
-  memory_max_line=""
-  if [ -n "${mem_high}" ] && [[ "${mem_high}" =~ ^[0-9]+$ ]] && [ "${mem_high}" -gt 0 ]; then
-    memory_high_line="MemoryHigh=${mem_high}M"
-  fi
-  if [ -n "${mem_max}" ] && [[ "${mem_max}" =~ ^[0-9]+$ ]] && [ "${mem_max}" -gt 0 ]; then
-    memory_max_line="MemoryMax=${mem_max}M"
-  fi
-  # P2：放宽文件描述符上限，适配高连接数
-  nofile_line="LimitNOFILE=1048576"
-
-  cat >"${SYSTEMD_SERVICE_FILE}" <<EOF
-[Unit]
-Description=Singbox Manager
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=${BASE_DIR}
-ExecStartPre=/bin/mkdir -p ${BASE_DIR}/logs ${RUNTIME_DIR}
-ExecStartPre=${SINGBOX_BIN} check -c ${CONFIG_FILE}
-${mem_line}
-${gogc_line}
-${memory_high_line}
-${memory_max_line}
-${nofile_line}
-ExecStart=${SINGBOX_BIN} run -c ${CONFIG_FILE}
-Restart=on-failure
-RestartSec=3
-UMask=0077
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=yes
-ProtectControlGroups=yes
-ProtectKernelModules=yes
-ProtectKernelTunables=yes
-ProtectProc=invisible
-ProcSubset=pid
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-ReadWritePaths=${BASE_DIR}
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  cat >"${SYSTEMD_WATCHDOG_SERVICE_FILE}" <<EOF
-[Unit]
-Description=Singbox Manager Watchdog
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=${WATCHDOG_TARGET}
-KillMode=process
-UMask=0077
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=yes
-ProtectControlGroups=yes
-ProtectKernelModules=yes
-ProtectKernelTunables=yes
-ProtectProc=invisible
-ProcSubset=pid
-ReadWritePaths=${BASE_DIR}
-EOF
-
-  cat >"${SYSTEMD_WATCHDOG_TIMER_FILE}" <<EOF
-[Unit]
-Description=Run Singbox Manager Watchdog Every Minute
-
-[Timer]
-OnBootSec=90
-OnUnitActiveSec=60
-Unit=${WATCHDOG_SERVICE_NAME}.service
-
-[Install]
-WantedBy=timers.target
-EOF
-
-  systemctl daemon-reload
-  systemctl enable --now "${SERVICE_NAME}" >/dev/null 2>&1 || true
-  systemctl enable --now "${WATCHDOG_TIMER_NAME}" >/dev/null 2>&1 || true
-}
-
-create_openrc_units() {
-  local mem_line gogc_line
-  local mem_limit
-  mem_line=""
-  gogc_line=""
-  mem_limit="$(go_mem_limit_value)"
-  if [ -n "${mem_limit}" ]; then
-    mem_line="export GOMEMLIMIT=${mem_limit}"
-  fi
-  if go_gc_requested; then
-    gogc_line="export GOGC=off"
-  fi
-
-  cat >"${OPENRC_SERVICE_FILE}" <<EOF
-#!/sbin/openrc-run
-
-name="${SERVICE_NAME}"
-description="Singbox Manager"
-command="${SINGBOX_BIN}"
-command_args="run -c ${CONFIG_FILE}"
-command_background=true
-pidfile="${PID_FILE}"
-
-depend() {
-  need net
-}
-
-start_pre() {
-  mkdir -p ${BASE_DIR}/logs ${RUNTIME_DIR}
-  ${SINGBOX_BIN} check -c ${CONFIG_FILE} >/dev/null
-  ${mem_line}
-  ${gogc_line}
-}
-EOF
-
-  chmod 0755 "${OPENRC_SERVICE_FILE}"
-  rc-update add "${SERVICE_NAME}" default >/dev/null 2>&1 || true
-
-  if command_exists rc-service && [ -x /etc/init.d/crond ]; then
-    rc-update add crond default >/dev/null 2>&1 || true
-    rc-service crond start >/dev/null 2>&1 || true
-  fi
-}
-
-create_cron_watchdog() {
-  if ! command_exists crontab; then
-    print_warn "未找到 crontab，已跳过 watchdog 的 cron 创建。"
-    return 0
-  fi
-
-  (
-    crontab -l 2>/dev/null | grep -Fv "${WATCHDOG_TARGET}" | grep -Fv "no crontab for" || true
-    echo "* * * * * ${WATCHDOG_TARGET} >/dev/null 2>&1"
-  ) | crontab -
-}
-
-service_state() {
-  detect_systemd
-  if [ "${has_systemd}" = true ]; then
-    if systemctl is-active --quiet "${SERVICE_NAME}"; then
-      printf '运行中'
-    else
-      printf '已停止'
-    fi
-    return 0
-  fi
-
-  if [ "${has_openrc}" = true ]; then
-    if rc-service "${SERVICE_NAME}" status >/dev/null 2>&1; then
-      printf '运行中'
-    else
-      printf '已停止'
-    fi
-    return 0
-  fi
-
-  local pid
-  pid="$(read_pid_file "${PID_FILE}" 2>/dev/null || true)"
-  # 存活且确为 sing-box 实例才显示运行中，防止 PID 复用导致误报
-  if [ -n "${pid}" ] && pid_matches_binary_or_alive "${pid}" "${SINGBOX_BIN}"; then
-    printf '运行中'
-  else
-    printf '已停止'
-  fi
-}
-
-stop_service() {
-  detect_systemd
-  if [ "${has_systemd}" = true ]; then
-    systemctl stop "${SERVICE_NAME}" >/dev/null 2>&1 || true
-  elif [ "${has_openrc}" = true ]; then
-    rc-service "${SERVICE_NAME}" stop >/dev/null 2>&1 || true
-    kill_pid_file "${PID_FILE}" "${SINGBOX_BIN}"
-  else
-    kill_pid_file "${PID_FILE}" "${SINGBOX_BIN}"
-  fi
-}
-
-# 低内存守卫：小内存机（默认 <200MB）提示资源约束；watchdog/cloudflared 侧已自动收紧
-ensure_low_memory_guard() {
-  local total_kb avail_mb low_mb
-  low_mb="${SBM_LOW_MEM_MB:-200}"
-  total_kb="$(awk '/^(MemTotal|MemTotal:)/ { print $2; exit }' /proc/meminfo 2>/dev/null || true)"
-  [ -n "${total_kb}" ] || return 0
-  avail_mb=$((total_kb / 1024))
-  if [ "${avail_mb}" -lt "${low_mb}" ]; then
-    print_warn "检测到低内存环境（约 ${avail_mb}MB < ${low_mb}MB）：已为 sing-box/cloudflared 设置 GOMEMLIMIT 软上限并强制 cloudflared http2 模式。"
-    print_warn "建议少开协议节点、避免同时开启多个 Argo 节点；隧道进程内存尖峰靠 Go 软上限抑制。"
-  fi
-}
-
-start_service() {
-  detect_systemd
-  [ -x "${SINGBOX_BIN}" ] || fatal "尚未安装 sing-box。"
-  rotate_log_file "${BASE_DIR}/logs/sing-box.log" || true
-  "${SINGBOX_BIN}" check -c "${CONFIG_FILE}" >/dev/null
-  warn_if_bindv6only
-
-  local mem_limit
-  mem_limit="$(go_mem_limit_value)"
-
-  if [ "${has_systemd}" = true ]; then
-    systemctl daemon-reload
-    systemctl restart "${SERVICE_NAME}" >/dev/null 2>&1 || systemctl start "${SERVICE_NAME}" >/dev/null 2>&1
-    systemctl enable --now "${WATCHDOG_TIMER_NAME}" >/dev/null 2>&1 || true
-  elif [ "${has_openrc}" = true ]; then
-    stop_service
-    rc-service "${SERVICE_NAME}" restart >/dev/null 2>&1 || rc-service "${SERVICE_NAME}" start >/dev/null 2>&1
-  else
-    stop_service
-    local env_prefix=()
-    if [ -n "${mem_limit}" ]; then
-      env_prefix+=(GOMEMLIMIT="${mem_limit}")
-    fi
-    # P5：可选 GOGC=off（彻底关闭逃逸堆目标，适合希望避免频繁 GC 的场景）
-    if go_gc_requested; then
-      env_prefix+=(GOGC="off")
-    fi
-    if [ "${#env_prefix[@]}" -gt 0 ]; then
-      nohup env "${env_prefix[@]}" "${SINGBOX_BIN}" run -c "${CONFIG_FILE}" >>"${BASE_DIR}/logs/sing-box.log" 2>&1 &
-    else
-      nohup "${SINGBOX_BIN}" run -c "${CONFIG_FILE}" >>"${BASE_DIR}/logs/sing-box.log" 2>&1 &
-    fi
-    write_pid_file "${PID_FILE}" "$!"
-  fi
-
-  print_ok "服务状态：$(service_state)"
-}
-
 install_core() {
-  detect_systemd
   acquire_lock
   ensure_dependencies
   init_storage
@@ -582,9 +301,9 @@ install_core() {
   ensure_low_memory_guard
   render_config
   apply_network_tune
-  if [ "${has_systemd}" = true ]; then
+  if systemd_available; then
     create_systemd_units
-  elif [ "${has_openrc}" = true ]; then
+  elif openrc_available; then
     create_openrc_units
     create_cron_watchdog
   else
@@ -594,14 +313,6 @@ install_core() {
   restart_all_argo_nodes
   sanitize_permissions
   release_lock
-}
-
-ensure_singbox_ready() {
-  init_storage
-  if [ ! -x "${SINGBOX_BIN}" ]; then
-    print_info "检测到 sing-box 尚未安装，开始自动安装。"
-    install_core
-  fi
 }
 
 update_script() {
@@ -634,7 +345,6 @@ uninstall_project() {
     return 1
   fi
 
-  detect_systemd
   acquire_lock
   while IFS= read -r tag; do
     [ -n "${tag}" ] || continue
@@ -643,12 +353,12 @@ uninstall_project() {
 
   stop_service || true
 
-  if [ "${has_systemd}" = true ]; then
+  if systemd_available; then
     systemctl disable --now "${WATCHDOG_TIMER_NAME}" >/dev/null 2>&1 || true
     systemctl disable --now "${SERVICE_NAME}" >/dev/null 2>&1 || true
     rm -f "${SYSTEMD_SERVICE_FILE}" "${SYSTEMD_WATCHDOG_SERVICE_FILE}" "${SYSTEMD_WATCHDOG_TIMER_FILE}"
     systemctl daemon-reload || true
-  elif [ "${has_openrc}" = true ]; then
+  elif openrc_available; then
     rc-update del "${SERVICE_NAME}" default >/dev/null 2>&1 || true
     rm -f "${OPENRC_SERVICE_FILE}"
   fi
@@ -662,3 +372,4 @@ uninstall_project() {
   print_ok "项目已卸载。"
   return 0
 }
+
