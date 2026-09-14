@@ -68,6 +68,12 @@ source "${ROOT_DIR}/sb.sh"
 assert_eq "normalize_input 去首尾空白" "hello" "$(normalize_input "  hello  ")"
 assert_eq "normalize_input 删除控制字符" "abcd" "$(normalize_input "$(printf 'ab\tc\rd')")"
 
+# --- env_var（纯 bash 实现，语义对齐 normalize_input） ---
+assert_eq "env_var 修剪首尾空白" "hi" "$(ENV_TEST_X="  hi  "; env_var ENV_TEST_X)"
+# shellcheck disable=SC2034 # 供 env_var 读取的环境变量，仅存在于子 shell 内
+assert_eq "env_var 剔除控制字符/CR" "abcd" "$(ENV_TEST_X="$(printf 'ab\tc\rd')"; env_var ENV_TEST_X)"
+assert_eq "env_var 未设置返回空" "" "$(unset ENV_TEST_X; env_var ENV_TEST_X)"
+
 # --- 端口与环境变量解析 ---
 assert_eval_true "env_port 合法端口" 'vlrt=2083; [ "$(env_port vlrt)" = "2083" ]'
 assert_eval_false "env_port 非法端口" 'vlrt=abc; env_port vlrt'
@@ -107,6 +113,34 @@ assert_eq "node_value 读取协议" "vless-reality" "$(node_value n1 protocol)"
 assert_eq "secret_value 读取 uuid" "uuid-1111" "$(secret_value n1 uuid)"
 json_set_field "${NODES_FILE}" "n1" "endpoint_domain" "demo.example.com"
 assert_eq "json_set_field 写入字段" "demo.example.com" "$(node_value n1 endpoint_domain)"
+
+# --- node_meta 单次 jq 批量字段（性能优化：nodes+secrets 合并取 25 字段） ---
+assert_eq "node_meta 协议" "vless-reality" "$(node_meta n1 | sed -n '1p')"
+assert_eq "node_meta 端口" "443" "$(node_meta n1 | sed -n '3p')"
+assert_eq "node_meta uuid" "uuid-1111" "$(node_meta n1 | sed -n '4p')"
+assert_eq "node_meta private_key" "priv_test" "$(node_meta n1 | sed -n '6p')"
+assert_eq "node_meta public_key" "pbk_test" "$(node_meta n1 | sed -n '7p')"
+assert_eq "node_meta short_id" "abcd" "$(node_meta n1 | sed -n '8p')"
+assert_eq "node_meta 缺失字段补空行" "" "$(node_meta n1 | sed -n '9p')"
+assert_eq "node_meta 输出恰好 25 行" "25" "$(node_meta n1 | wc -l)"
+
+# --- 端口占用快照（性能优化：每端口不再重复 jq/ss） ---
+assert_eval_true "metadata_has_port 命中节点端口" 'metadata_has_port 443'
+assert_eval_false "metadata_has_port 未占用端口" 'metadata_has_port 55337'
+assert_eval_false "port_available 已占用端口为假" 'port_available 443'
+assert_eval_true "port_available 未占用端口为真" 'port_available 55337'
+json_set_record "${NODES_FILE}" "nport" '{"protocol":"socks5","name":"Port","port":55337}'
+assert_eval_true "写记录后快照即时刷新检出端口" 'metadata_has_port 55337'
+assert_eval_false "写记录后 port_available 拒绝该端口" 'port_available 55337'
+json_delete_record "${NODES_FILE}" "nport"
+assert_eval_false "删记录后快照即时释放端口" 'metadata_has_port 55337'
+assert_eval_true "删记录后 port_available 放行" 'port_available 55337'
+
+# Reality inbound 渲染直接消费 node_meta 的 uuid/private_key/short_id
+tmpcfg="$(mktemp "${TEST_ROOT}/cfg.XXXXXX")"
+render_inbound_for_tag n1 >"${tmpcfg}" 2>/dev/null
+assert_eval_true "Reality inbound 用 node_meta 的 uuid/private_key" 'jq -e ".users[0].uuid == \"uuid-1111\" and .tls.reality.private_key == \"priv_test\" and .tls.reality.short_id[0] == \"abcd\"" "${tmpcfg}" >/dev/null'
+rm -f "${tmpcfg}"
 
 # --- 分享链接 ---
 assert_eval_true "Reality 链接含 reality 参数" 'build_share_link n1 | grep -q "security=reality"'

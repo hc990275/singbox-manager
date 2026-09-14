@@ -312,6 +312,7 @@ json_set_record() {
   local json="$3"
   # shellcheck disable=SC2016
   json_update "$file" --arg tag "$tag" --argjson value "$json" '.[$tag] = $value'
+  invalidate_port_caches_if_defined
 }
 
 json_delete_record() {
@@ -319,6 +320,7 @@ json_delete_record() {
   local tag="$2"
   # shellcheck disable=SC2016
   json_update "$file" --arg tag "$tag" 'del(.[$tag])'
+  invalidate_port_caches_if_defined
 }
 
 json_set_field() {
@@ -328,6 +330,15 @@ json_set_field() {
   local value="$4"
   # shellcheck disable=SC2016
   json_update "$file" --arg tag "$tag" --arg field "$field" --arg value "$value" '.[$tag][$field] = $value'
+  invalidate_port_caches_if_defined
+}
+
+# nodes.sh 定义 invalidate_port_caches 时触发清空端口快照；
+# 本文件也允许在未 source nodes.sh 的场景（check-version.sh 等）单独使用。
+invalidate_port_caches_if_defined() {
+  if declare -F invalidate_port_caches >/dev/null 2>&1; then
+    invalidate_port_caches
+  fi
 }
 
 record_value() {
@@ -528,12 +539,16 @@ get_setting() {
   printf '%s' "${value:-${default}}"
 }
 
-# 读取同名环境变量并去掉首尾空白/控制字符；sb.sh 亦定义同名函数，此处保证
-# watchdog/standalone 场景（仅 source common.sh）也能使用。
+# 读取同名环境变量并去掉首尾空白/控制字符；watchdog/standalone 场景（仅 source common.sh）同样可用。
+# 纯 bash 实现（无 tr/sed 管道子进程），语义与 ui.sh 的 normalize_input 一致
+# （剔除控制字符/CR，再裁首尾空白）。nodes.sh 曾重复定义本函数，已统一到此处。
 env_var() {
   local __env_key="$1"
   local __env_value="${!__env_key:-}"
-  printf '%s' "$(printf '%s' "${__env_value}" | tr -d '\r\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  __env_value="${__env_value//[[:cntrl:]]/}"
+  while [[ "${__env_value}" == [[:space:]]* ]]; do __env_value="${__env_value#?}"; done
+  while [[ "${__env_value}" == *[[:space:]] ]]; do __env_value="${__env_value%?}"; done
+  printf '%s' "${__env_value}"
 }
 
 # 全局调优参数读取：优先瞬时环境变量（install 时），否则回退 settings.json
@@ -560,6 +575,8 @@ set_setting() {
 
 get_public_ip() {
   local ip ipver flag url
+  local cached cached_ts now ttl cached_ver
+
   if [ -n "${PUBLIC_IP_CACHE}" ]; then
     printf '%s' "${PUBLIC_IP_CACHE}"
     return 0
@@ -571,6 +588,21 @@ get_public_ip() {
   6 | v6) ipver="6" ;;
   *) ipver="4" ;;
   esac
+
+  # 持久化缓存：settings.json 的 public_ip/public_ip_ts 在 TTL 内且 ip 版本匹配时直接复用，
+  # 避免 sbm list/sub/show_status 每次启动都外呼公网探测服务（SBM_IP_CACHE_TTL 秒，默认 600）。
+  ttl="${SBM_IP_CACHE_TTL:-600}"
+  cached="$(get_setting "public_ip")"
+  cached_ts="$(get_setting "public_ip_ts")"
+  cached_ver="$(get_setting "public_ip_version")"
+  now="$(date +%s 2>/dev/null || printf 0)"
+  if [ -n "${cached}" ] && is_ip_address "${cached}" && ! is_private_ip "${cached}" &&
+    { [ -z "${cached_ver}" ] || [ "${cached_ver}" = "${ipver}" ]; } &&
+    { [ "${now}" -eq 0 ] || { [[ "${cached_ts}" =~ ^[0-9]+$ ]] && [ $((now - cached_ts)) -lt "${ttl}" ]; }; }; then
+    PUBLIC_IP_CACHE="${cached}"
+    printf '%s' "${PUBLIC_IP_CACHE}"
+    return 0
+  fi
 
   local families=(4 6)
   if [ "${ipver}" = "6" ]; then
@@ -584,6 +616,9 @@ get_public_ip() {
         ip="$(curl -fsS --max-time 5 ${flag} "$url" 2>/dev/null | tr -d '\r\n' || true)"
         if is_ip_address "$ip" && ! is_private_ip "$ip"; then
           PUBLIC_IP_CACHE="$ip"
+          set_setting "public_ip" "$ip"
+          set_setting "public_ip_version" "${ipver}"
+          set_setting "public_ip_ts" "$now"
           printf '%s' "${PUBLIC_IP_CACHE}"
           return 0
         fi
@@ -594,6 +629,9 @@ get_public_ip() {
         ip="$(curl -fsS --max-time 5 ${flag} "$url" 2>/dev/null | tr -d '\r\n' || true)"
         if is_ip_address "$ip" && ! is_private_ip "$ip"; then
           PUBLIC_IP_CACHE="$ip"
+          set_setting "public_ip" "$ip"
+          set_setting "public_ip_version" "${ipver}"
+          set_setting "public_ip_ts" "$now"
           printf '%s' "${PUBLIC_IP_CACHE}"
           return 0
         fi
@@ -1448,11 +1486,30 @@ build_share_link() {
   local tag="$1"
   local public_ip="${2:-}"
   local protocol name port host uuid password username fp
-  local reality_server public_key short_id ws_path preferred_domain endpoint_domain host_domain tls_server cert_mode ws_mode cdn_port cdn_sni ext
+  local reality_server public_key short_id ws_path preferred_domain endpoint_domain host_domain tls_server cert_mode ws_mode cdn_port cdn_sni ext certificate_path
 
-  protocol="$(node_value "$tag" "protocol")"
-  name="$(node_value "$tag" "name")"
-  port="$(node_value "$tag" "port")"
+  # 单次 jq 批量取出全部字段（nodes+secrets），替代逐字段 node_value/secret_value
+  # 的多次 jq 进程（每次 sbm list/sub 对每个节点可省十次左右 jq 启动）
+  node_meta_array "$tag"
+  protocol="${NODE_META[0]}"
+  name="${NODE_META[1]}"
+  port="${NODE_META[2]}"
+  uuid="${NODE_META[3]}"
+  password="${NODE_META[4]}"
+  public_key="${NODE_META[6]}"
+  short_id="${NODE_META[7]}"
+  reality_server="${NODE_META[8]}"
+  tls_server="${NODE_META[9]}"
+  preferred_domain="${NODE_META[10]}"
+  host_domain="${NODE_META[11]}"
+  ws_path="${NODE_META[12]}"
+  ws_mode="${NODE_META[13]}"
+  cdn_port="${NODE_META[14]}"
+  cdn_sni="${NODE_META[15]}"
+  cert_mode="${NODE_META[16]}"
+  certificate_path="${NODE_META[17]}"
+  endpoint_domain="${NODE_META[19]}"
+  username="${NODE_META[24]}"
   # 支持外部一次性传入解析好的公网 IP（第 2 参），便于订阅/列表在一次网络探测后
   # 复用，避免 N 个节点重复探测；未传时回退进程内缓存探测。
   public_ip="${public_ip:-$(get_public_ip)}"
@@ -1460,22 +1517,13 @@ build_share_link() {
 
   case "$protocol" in
   vless-reality)
-    uuid="$(secret_value "$tag" "uuid")"
-    reality_server="$(url_encode "$(node_value "$tag" "reality_server")")"
-    public_key="$(url_encode "$(node_value "$tag" "public_key")")"
-    short_id="$(url_encode "$(node_value "$tag" "short_id")")"
+    reality_server="$(url_encode "${reality_server}")"
+    public_key="$(url_encode "${public_key}")"
+    short_id="$(url_encode "${short_id}")"
     printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s' \
       "$uuid" "$host" "$port" "$reality_server" "$public_key" "$short_id" "$(url_encode "$name")"
     ;;
   vless-ws-tls)
-    uuid="$(secret_value "$tag" "uuid")"
-    ws_path="$(node_value "$tag" "ws_path")"
-    preferred_domain="$(node_value "$tag" "preferred_domain")"
-    host_domain="$(node_value "$tag" "host_domain")"
-    cert_mode="$(node_value "$tag" "certificate_mode")"
-    ws_mode="$(node_value "$tag" "ws_mode")"
-    cdn_port="$(node_value "$tag" "cdn_port")"
-    cdn_sni="$(node_value "$tag" "cdn_sni")"
     ws_mode="${ws_mode:-direct}"
     cdn_port="${cdn_port:-443}"
     if [ "${ws_mode}" = "cdn" ]; then
@@ -1498,7 +1546,7 @@ build_share_link() {
     if [ "$cert_mode" = "self-signed" ] && [ "${ws_mode}" != "cdn" ]; then
       # 自签证书固定指纹（新版 Xray/v2rayN 已拒绝 allowInsecure，改用 pinnedPeerCertSha256）；
       # 无证书文件（旧节点）时回退 allowInsecure=1
-      fp="$(cert_fingerprint "$(node_value "$tag" "certificate_path")" 2>/dev/null || true)"
+      fp="$(cert_fingerprint "${certificate_path}" 2>/dev/null || true)"
       if [ -n "${fp}" ]; then
         printf '&pcs=%s' "${fp}"
       else
@@ -1508,9 +1556,7 @@ build_share_link() {
     printf '#%s' "$(url_encode "$name")"
     ;;
   anytls)
-    password="$(secret_value "$tag" "password")"
-    tls_server="$(url_encode "$(node_value "$tag" "tls_server")")"
-    cert_mode="$(node_value "$tag" "certificate_mode")"
+    tls_server="$(url_encode "${tls_server}")"
     # 自签证书：insecure=1 跳过校验；type/headerType 声明 TCP 传输，兼容主流客户端解析
     if [ "$cert_mode" = "self-signed" ]; then
       ext="insecure=1&"
@@ -1522,12 +1568,7 @@ build_share_link() {
     printf '#%s' "$(url_encode "$name")"
     ;;
   vless-argo)
-    uuid="$(secret_value "$tag" "uuid")"
-    ws_path="$(node_value "$tag" "ws_path")"
-    preferred_domain="$(node_value "$tag" "preferred_domain")"
-    cdn_port="$(node_value "$tag" "cdn_port")"
     cdn_port="${cdn_port:-443}"
-    endpoint_domain="$(node_value "$tag" "endpoint_domain")"
     if [ -z "${endpoint_domain}" ] || [ "${endpoint_domain}" = "待分配.example.com" ]; then
       print_warn "节点 ${tag} 的 Argo 域名尚未分配（隧道可能未连上），链接暂不可用；稍后重试 sbm list。"
       return 0
@@ -1537,10 +1578,7 @@ build_share_link() {
       "$(url_encode "$endpoint_domain")" "$(url_encode "$endpoint_domain")" "$(url_encode "$ws_path")" "$(url_encode "$name")"
     ;;
   tuic-v5)
-    uuid="$(secret_value "$tag" "uuid")"
-    password="$(secret_value "$tag" "password")"
-    tls_server="$(url_encode "$(node_value "$tag" "tls_server")")"
-    cert_mode="$(node_value "$tag" "certificate_mode")"
+    tls_server="$(url_encode "${tls_server}")"
     printf 'tuic://%s:%s@%s:%s?congestion_control=bbr&alpn=h3&sni=%s' \
       "$uuid" "$(url_encode "$password")" "$host" "$port" "$tls_server"
     if [ "$cert_mode" = "self-signed" ]; then
@@ -1549,14 +1587,12 @@ build_share_link() {
     printf '#%s' "$(url_encode "$name")"
     ;;
   hy2)
-    password="$(secret_value "$tag" "password")"
-    tls_server="$(url_encode "$(node_value "$tag" "tls_server")")"
-    cert_mode="$(node_value "$tag" "certificate_mode")"
+    tls_server="$(url_encode "${tls_server}")"
     printf 'hysteria2://%s@%s:%s?sni=%s' \
       "$(url_encode "$password")" "$host" "$port" "$tls_server"
     if [ "$cert_mode" = "self-signed" ]; then
       # 自签优先固定证书指纹（新版客户端已拒绝 insecure）；无指纹再退回 insecure=1
-      fp="$(cert_fingerprint "$(node_value "$tag" "certificate_path")" 2>/dev/null || true)"
+      fp="$(cert_fingerprint "${certificate_path}" 2>/dev/null || true)"
       if [ -n "${fp}" ]; then
         printf '&pinSHA256=%s' "${fp}"
       else
@@ -1566,8 +1602,6 @@ build_share_link() {
     printf '#%s' "$(url_encode "$name")"
     ;;
   socks5)
-    username="$(node_value "$tag" "username")"
-    password="$(secret_value "$tag" "password")"
     printf 'socks5://%s:%s@%s:%s#%s' \
       "$(url_encode "$username")" "$(url_encode "$password")" "$host" "$port" "$(url_encode "$name")"
     ;;

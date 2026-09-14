@@ -6,29 +6,44 @@ umask 077
 # 本文件由 sb.sh 模块拆分生成：函数自原 sb.sh 原样迁出（见各自函数上方注释）。
 # 依赖 lib/common.sh 提供的基础函数与全局变量，须在 common.sh 之后被 source。
 
+# 进程内端口快照：metadata（nodes.json）与系统监听各只查询一次，
+# 之后 port_available 命中内存集合即可，避免每端口重复 jq/ss（auto_install 一次装多节点收益明显）。
+# 任何节点端口的写操作（save_node_bundle / wipe_records / delete_node）都会 invalidate 使快照刷新。
+_METADATA_PORTS=""
+_SYSTEM_PORTS=""
+NODE_META=()
+
+invalidate_port_caches() {
+  _METADATA_PORTS=""
+  _SYSTEM_PORTS=""
+}
+
+snapshot_metadata_ports() {
+  [ -n "${_METADATA_PORTS:-}" ] && return 0
+  _METADATA_PORTS="$(jq -r '.. | objects | .port? // empty' "${NODES_FILE}" 2>/dev/null | tr -d '\r' | grep -E '^[0-9]+$' | sort -nu | tr '\n' ' ' || true)"
+  : "${_METADATA_PORTS:=}"
+}
+
+snapshot_system_ports() {
+  [ -n "${_SYSTEM_PORTS:-}" ] && return 0
+  if command_exists ss; then
+    _SYSTEM_PORTS="$(ss -ltnuH 2>/dev/null | awk '$1 ~ /^(tcp|tcp6|udp|udp6)$/ { t=$4; sub(/.*:/,"",t); if (t ~ /^[0-9]+$/) print t }' | sort -nu | tr '\n' ' ' || true)"
+  elif command_exists netstat; then
+    _SYSTEM_PORTS="$(netstat -lntup 2>/dev/null | awk '$1 ~ /^(tcp|tcp6|udp|udp6)$/ { t=$4; sub(/.*:/,"",t); if (t ~ /^[0-9]+$/) print t }' | sort -nu | tr '\n' ' ' || true)"
+  fi
+  : "${_SYSTEM_PORTS:=}"
+}
+
 metadata_has_port() {
   local port="$1"
-  jq -e --argjson port "$port" 'to_entries | any(.value.port == $port)' "${NODES_FILE}" >/dev/null 2>&1
+  snapshot_metadata_ports
+  [[ " ${_METADATA_PORTS} " == *" ${port} "* ]]
 }
 
 system_has_port() {
   local port="$1"
-  if command_exists ss; then
-    ss -ltnuH 2>/dev/null | awk -v port="$port" '
-      $1 ~ /^(tcp|tcp6|udp|udp6)$/ {
-        addr = $5; sub(/.*:/, "", addr); if (addr == port) found = 1
-      }
-      END { exit found ? 0 : 1 }
-    '
-  elif command_exists netstat; then
-    netstat -lntup 2>/dev/null | awk -v port="$port" '
-      $1 ~ /^(tcp|tcp6|udp|udp6)$/ {
-        addr = $4; sub(/.*:/, "", addr); if (addr == port) found = 1
-      }
-      END { exit found ? 0 : 1 }'
-  else
-    return 1
-  fi
+  snapshot_system_ports
+  [[ " ${_SYSTEM_PORTS} " == *" ${port} "* ]]
 }
 
 port_available() {
@@ -200,6 +215,7 @@ save_node_bundle() {
   local secret_json="$3"
   json_set_record "${NODES_FILE}" "$tag" "$node_json"
   json_set_record "${SECRETS_FILE}" "$tag" "$secret_json"
+  invalidate_port_caches
 }
 
 render_config() {
@@ -268,17 +284,84 @@ render_config() {
   fi
 }
 
-express_restart() { :; }
-  jq_eno() { :; }
-  render_inbound_for_tag() {
+node_meta() {
+  local tag="$1"
+  # 单进程 jq 合并 nodes+secrets 输出 25 个字段（每行一个，空值输出空行），
+  # 字段路径与 node_value/secret_value（.[$tag][$field]）完全一致；
+  # 渲染/分享链接按节点仅启动 1 次 jq，替代逐字段 node_value/secret_value 的多次启动。
+  # 输出用"每行一个字段"而非 tab 分隔：bash 的 read/cut 会合并连续 tab 并吞掉空字段，
+  # 空行则能被 while read 完整保留。
+  jq -n -r --arg tag "$tag" \
+    --rawfile nodes "${NODES_FILE}" \
+    --rawfile secrets "${SECRETS_FILE}" '
+    ($nodes | fromjson | .[$tag] // {}) as $n |
+    ($secrets | fromjson | .[$tag] // {}) as $s |
+    [
+      ($n.protocol // ""),
+      ($n.name // ""),
+      (($n.port // "") | tostring),
+      ($s.uuid // ""),
+      ($s.password // ""),
+      ($s.private_key // ""),
+      ($n.public_key // ""),
+      ($n.short_id // ""),
+      ($n.reality_server // ""),
+      ($n.tls_server // ""),
+      ($n.preferred_domain // ""),
+      ($n.host_domain // ""),
+      ($n.ws_path // ""),
+      ($n.ws_mode // ""),
+      (($n.cdn_port // "") | tostring),
+      ($n.cdn_sni // ""),
+      ($n.certificate_mode // ""),
+      ($n.certificate_path // ""),
+      ($n.key_path // ""),
+      ($n.endpoint_domain // ""),
+      ($n.argo_mode // ""),
+      ($s.argo_token // ""),
+      (($n.up_mbps // "") | tostring),
+      (($n.down_mbps // "") | tostring),
+      ($n.username // "")
+    ] | .[]
+  '
+}
+
+# 把 node_meta 的 25 行输出读入全局 NODE_META（空字段保留为空元素），并去掉行尾 \r
+# （Windows 原生 jq 输出 CRLF）。index 0..24 与 node_meta 字段顺序一致。
+node_meta_array() {
+  local tag="$1" i=0 _f
+  NODE_META=()
+  while IFS= read -r _f; do
+    NODE_META[i++]="${_f%$'\r'}"
+    [ "$i" -ge 25 ] && break
+  done < <(node_meta "$tag")
+  while [ "$i" -lt 25 ]; do NODE_META[i++]=""; done
+}
+
+render_inbound_for_tag() {
   local tag="$1"
   local protocol name port uuid password cert_file key_file ws_path reality_server tcp_fast_open
-  local up_mbps down_mbps bbr_profile
+  local up_mbps down_mbps bbr_profile private_key short_id
   local __tfo
 
-  protocol="$(node_value "$tag" "protocol")"
-  name="$(node_value "$tag" "name")"
-  port="$(node_value "$tag" "port")"
+  # 单次 jq 批量取出 nodes+secrets 全部字段，替代逐字段 node_value/secret_value（每节点省多次 jq 启动）
+  node_meta_array "$tag"
+  protocol="${NODE_META[0]}"
+  name="${NODE_META[1]}"
+  port="${NODE_META[2]}"
+  uuid="${NODE_META[3]}"
+  password="${NODE_META[4]}"
+  private_key="${NODE_META[5]}"
+  short_id="${NODE_META[7]}"
+  reality_server="${NODE_META[8]}"
+  ws_path="${NODE_META[12]}"
+  ws_mode="${NODE_META[13]}"
+  cert_mode="${NODE_META[16]}"
+  cert_file="${NODE_META[17]}"
+  key_file="${NODE_META[18]}"
+  up_mbps="${NODE_META[22]}"
+  down_mbps="${NODE_META[23]}"
+  username="${NODE_META[24]}"
   # 全局 TCP Fast Open（默认开启，1.14.0 各 TCP 入站均支持）
   case "$(env_var "tcp_fast_open")" in
   "" | 1) __tfo=true ;;
@@ -287,15 +370,13 @@ express_restart() { :; }
 
   case "$protocol" in
   vless-reality)
-    uuid="$(secret_value "$tag" "uuid")"
-    reality_server="$(node_value "$tag" "reality_server")"
     jq -n \
       --arg tag "$tag" \
       --arg name "$name" \
       --arg uuid "$uuid" \
       --arg server "$reality_server" \
-      --arg private_key "$(secret_value "$tag" "private_key")" \
-      --arg short_id "$(node_value "$tag" "short_id")" \
+      --arg private_key "$private_key" \
+      --arg short_id "$short_id" \
       --argjson port "$port" \
       --argjson tfo "${__tfo}" '{
           type: "vless",
@@ -317,10 +398,6 @@ express_restart() { :; }
         }'
     ;;
   vless-ws-tls)
-    uuid="$(secret_value "$tag" "uuid")"
-    ws_path="$(node_value "$tag" "ws_path")"
-    cert_file="$(node_value "$tag" "certificate_path")"
-    key_file="$(node_value "$tag" "key_path")"
     # 主 inbound：TLS 端口（v1.2.4 起 CDN 模式统一单端口：客户端连 CDN 边缘，CF 按 SSL 模式
     # Full/Full(Strict) 以 HTTPS 回源到本 TLS 端口，无需明文回源 inbound）。
     jq -n \
@@ -347,9 +424,6 @@ express_restart() { :; }
         }'
     ;;
   anytls)
-    password="$(secret_value "$tag" "password")"
-    cert_file="$(node_value "$tag" "certificate_path")"
-    key_file="$(node_value "$tag" "key_path")"
     jq -n \
       --arg tag "$tag" \
       --arg name "$name" \
@@ -372,8 +446,6 @@ express_restart() { :; }
         }'
     ;;
   vless-argo)
-    uuid="$(secret_value "$tag" "uuid")"
-    ws_path="$(node_value "$tag" "ws_path")"
     jq -n \
       --arg tag "$tag" \
       --arg name "$name" \
@@ -391,10 +463,6 @@ express_restart() { :; }
         }'
     ;;
   tuic-v5)
-    uuid="$(secret_value "$tag" "uuid")"
-    password="$(secret_value "$tag" "password")"
-    cert_file="$(node_value "$tag" "certificate_path")"
-    key_file="$(node_value "$tag" "key_path")"
     jq -n \
       --arg tag "$tag" \
       --arg name "$name" \
@@ -420,12 +488,6 @@ express_restart() { :; }
         }'
     ;;
   hy2)
-    password="$(secret_value "$tag" "password")"
-    cert_file="$(node_value "$tag" "certificate_path")"
-    key_file="$(node_value "$tag" "key_path")"
-    local up_mbps down_mbps bbr_profile
-    up_mbps="$(node_value "$tag" "up_mbps")"
-    down_mbps="$(node_value "$tag" "down_mbps")"
     up_mbps="${up_mbps:-200}"
     down_mbps="${down_mbps:-200}"
     # 全局 bbr_profile：aggressive|standard|conservative（sing-box 1.14.0+），空=默认
@@ -464,8 +526,8 @@ express_restart() { :; }
   socks5)
     jq -n \
       --arg tag "$tag" \
-      --arg username "$(node_value "$tag" "username")" \
-      --arg password "$(secret_value "$tag" "password")" \
+      --arg username "$username" \
+      --arg password "$password" \
       --argjson port "$port" \
       --argjson tfo "${__tfo}" '{
           type: "socks",
@@ -900,11 +962,7 @@ add_socks5() {
 
 # 注意：局部变量统一加 __env_ 前缀，避免与用户环境变量同名，
 # 否则 ${!key} 间接引用会命中局部变量（bash 动态作用域）导致取值错误。
-env_var() {
-  local __env_key="$1"
-  local __env_value="${!__env_key:-}"
-  printf '%s' "$(normalize_input "${__env_value}")"
-}
+# （env_var 统一由 lib/common.sh 定义，避免两处实现语义漂移）
 
 env_port() {
   local __env_key="$1"
@@ -1342,6 +1400,7 @@ wipe_records() {
   printf '{}\n' >"${tmp}" && chmod 600 "${tmp}" && mv "${tmp}" "${NODES_FILE}"
   tmp="$(mktemp "${BASE_DIR}/.secrets.XXXXXX")"
   printf '{}\n' >"${tmp}" && chmod 600 "${tmp}" && mv "${tmp}" "${SECRETS_FILE}"
+  invalidate_port_caches
 }
 
 delete_all_nodes() {
@@ -1671,6 +1730,7 @@ delete_node() {
   fi
   delete_node_records "$tag"
   remove_node_certificates "$tag" "$cert_file" "$key_file"
+  invalidate_port_caches
   render_config || true
   start_service || true
   sanitize_permissions
