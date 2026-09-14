@@ -8,7 +8,7 @@ REPO_NAME="singbox-manager"
 PROJECT_VERSION="v1.3.1"
 PACKAGE_NAME="singbox-manager-v1.3.1.tar.gz"
 # 发布流程：scripts/build-release-bundle.sh 构建可复现 bundle，其 SHA256 与此处一致
-PACKAGE_SHA256="0cbc75db062f3e7a2558442da4cdfd5087af1d48978b3f77663e9b2419ab170a"
+PACKAGE_SHA256="5aeed9b2346eef099ba8edf4699ea6c7eb49e180f0ded8fe946f46ae29260429"
 PACKAGE_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${PROJECT_VERSION}/${PACKAGE_NAME}"
 
 INSTALL_BIN="/usr/local/bin/sbm"
@@ -135,7 +135,10 @@ main() {
   # MTProxy 独立脚本：设了 mtpt 即调用 mtp 完成安装（与 sbm 动作完全独立）
   mtp_install_done=0
   if [ -n "${mtpt:-}" ]; then
-    bash "${MTP_BIN}" || { echo "MTProxy 安装失败。" >&2; exit 1; }
+    bash "${MTP_BIN}" || {
+      echo "MTProxy 安装失败。" >&2
+      exit 1
+    }
     mtp_install_done=1
   fi
 

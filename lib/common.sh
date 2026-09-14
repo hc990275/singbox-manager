@@ -792,7 +792,7 @@ argo_domain_resolvable() {
   #     因为 cloudflared 日志已出现域名即代表边缘注册成功，此时拒绝会让
   #     弱网机器的临时隧道永远写不进域名（v0.2.19 前的故障面）
   if command_exists curl && command_exists jq; then
-    local doh_verified=0 answered=0 records source base_url record_type
+    local doh_verified=0 answered=0 records base_url record_type
     for base_url in "https://1.1.1.1/dns-query?name=${domain}." "https://dns.google/resolve?name=${domain}."; do
       for record_type in A AAAA; do
         records="$(curl -fsS --max-time 6 -H 'accept: application/dns-json' "${base_url}&type=${record_type}" 2>/dev/null | jq -r '[.Answer[]? | select(.type == 1 or .type == 28)] | length' 2>/dev/null || true)"
@@ -856,8 +856,11 @@ argo_backoff_delay() {
 read_restart_count() {
   local tag="$1"
   local file="${RUNTIME_DIR}/${tag}.restart_count"
-  [ -f "${file}" ] || { printf '0'; return 0; }
-  cat "${file}" 2>/dev/null | tr -dc '0-9' | grep -E '^[0-9]+$' || printf '0'
+  [ -f "${file}" ] || {
+    printf '0'
+    return 0
+  }
+  tr -dc '0-9' <"${file}" 2>/dev/null | grep -E '^[0-9]+$' || printf '0'
 }
 
 bump_restart_count() {
@@ -930,9 +933,9 @@ get_tcp_buffer_cap_mb() {
   mem_kb="$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null)"
   if ! [[ "${mem_kb}" =~ ^[0-9]+$ ]]; then
     printf '%s' 64
-  elif (( mem_kb < 524288 )); then
+  elif ((mem_kb < 524288)); then
     printf '%s' 16
-  elif (( mem_kb < 1048576 )); then
+  elif ((mem_kb < 1048576)); then
     printf '%s' 32
   else
     printf '%s' 64
@@ -943,25 +946,33 @@ get_tcp_buffer_cap_mb() {
 # asia 保守档（RTT 通常 <100ms）、overseas 大缓冲档（RTT 150-300ms）。
 # 带宽非法/缺失回退 1000Mbps；缓冲区不超 get_tcp_buffer_cap_mb 上限。
 calculate_net_tune_buffer_mb() {
-  local bandwidth="$1" region="$2" cap_mb="$(get_tcp_buffer_cap_mb)"
+  local bandwidth="$1" region="$2" cap_mb
+  cap_mb="$(get_tcp_buffer_cap_mb)"
   local buffer_mb=16
   bandwidth="${bandwidth%.*}"
-  if ! [[ "${bandwidth}" =~ ^[0-9]+$ ]] || (( bandwidth <= 0 )); then
+  if ! [[ "${bandwidth}" =~ ^[0-9]+$ ]] || ((bandwidth <= 0)); then
     bandwidth=1000
   fi
   if [ "${region}" = "overseas" ]; then
-    if (( bandwidth < 500 )); then buffer_mb=16
-    elif (( bandwidth < 1000 )); then buffer_mb=48
+    if ((bandwidth < 500)); then
+      buffer_mb=16
+    elif ((bandwidth < 1000)); then
+      buffer_mb=48
     else buffer_mb=64; fi
   else
-    if (( bandwidth < 500 )); then buffer_mb=8
-    elif (( bandwidth < 1000 )); then buffer_mb=12
-    elif (( bandwidth < 2000 )); then buffer_mb=16
-    elif (( bandwidth < 5000 )); then buffer_mb=24
-    elif (( bandwidth < 10000 )); then buffer_mb=28
+    if ((bandwidth < 500)); then
+      buffer_mb=8
+    elif ((bandwidth < 1000)); then
+      buffer_mb=12
+    elif ((bandwidth < 2000)); then
+      buffer_mb=16
+    elif ((bandwidth < 5000)); then
+      buffer_mb=24
+    elif ((bandwidth < 10000)); then
+      buffer_mb=28
     else buffer_mb=32; fi
   fi
-  (( buffer_mb > cap_mb )) && buffer_mb="${cap_mb}"
+  ((buffer_mb > cap_mb)) && buffer_mb="${cap_mb}"
   printf '%s' "${buffer_mb}"
 }
 
@@ -1001,14 +1012,26 @@ ensure_ookla_speedtest() {
   bin="${BASE_DIR}/bin/speedtest"
   tmp_dir="$(mktemp -d "${BASE_DIR}/bin/.st.XXXXXX" 2>/dev/null)" || return 1
   if command_exists curl; then
-    curl -fsSL --retry 2 --connect-timeout 10 --max-time 90 "${url}" -o "${tmp_dir}/t.tgz" || { rm -rf "${tmp_dir}"; return 1; }
+    curl -fsSL --retry 2 --connect-timeout 10 --max-time 90 "${url}" -o "${tmp_dir}/t.tgz" || {
+      rm -rf "${tmp_dir}"
+      return 1
+    }
   else
-    wget -q --tries=2 --timeout=90 -O "${tmp_dir}/t.tgz" "${url}" || { rm -rf "${tmp_dir}"; return 1; }
+    wget -q --tries=2 --timeout=90 -O "${tmp_dir}/t.tgz" "${url}" || {
+      rm -rf "${tmp_dir}"
+      return 1
+    }
   fi
-  tar -xzf "${tmp_dir}/t.tgz" -C "${tmp_dir}" || { rm -rf "${tmp_dir}"; return 1; }
+  tar -xzf "${tmp_dir}/t.tgz" -C "${tmp_dir}" || {
+    rm -rf "${tmp_dir}"
+    return 1
+  }
   mv -f "${tmp_dir}/speedtest" "${bin}" && chmod 0755 "${bin}"
   rm -rf "${tmp_dir}"
-  "${bin}" --version 2>/dev/null | grep -q "Speedtest by Ookla" || { rm -f "${bin}"; return 1; }
+  "${bin}" --version 2>/dev/null | grep -q "Speedtest by Ookla" || {
+    rm -f "${bin}"
+    return 1
+  }
   return 0
 }
 
@@ -1054,7 +1077,10 @@ measure_net_bandwidth() {
   else
     up="$(run_speedtest "${bin}" 2>/dev/null || true)"
   fi
-  [[ "${up}" =~ ^[0-9]+$ ]] && { printf '%s' "${up}"; return 0; }
+  [[ "${up}" =~ ^[0-9]+$ ]] && {
+    printf '%s' "${up}"
+    return 0
+  }
   return 1
 }
 
@@ -1077,7 +1103,10 @@ measure_net_metrics() {
   fi
   up="${out%% *}"
   lat="${out#* }"
-  [[ "${up}" =~ ^[0-9]+$ ]] && { printf '%s %s' "${up}" "${lat}"; return 0; }
+  [[ "${up}" =~ ^[0-9]+$ ]] && {
+    printf '%s %s' "${up}" "${lat}"
+    return 0
+  }
   return 1
 }
 
@@ -1160,11 +1189,26 @@ apply_sysctls() {
   done
 
   # 核心项写后回读校验（这些键所有常规内核均存在）
-  [ "$(sysctl -n net.core.rmem_max 2>/dev/null)" = "${buffer_bytes}" ] || { ok=false; err="${err}rmem_max "; }
-  [ "$(sysctl -n net.core.wmem_max 2>/dev/null)" = "${buffer_bytes}" ] || { ok=false; err="${err}wmem_max "; }
-  [ "$(sysctl -n net.core.default_qdisc 2>/dev/null)" = "fq" ] || { ok=false; err="${err}default_qdisc "; }
-  [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" = "bbr" ] || { ok=false; err="${err}tcp_congestion_control "; }
-  [ "$(sysctl -n net.ipv4.tcp_limit_output_bytes 2>/dev/null)" = "4194304" ] || { ok=false; err="${err}tcp_limit_output_bytes "; }
+  [ "$(sysctl -n net.core.rmem_max 2>/dev/null)" = "${buffer_bytes}" ] || {
+    ok=false
+    err="${err}rmem_max "
+  }
+  [ "$(sysctl -n net.core.wmem_max 2>/dev/null)" = "${buffer_bytes}" ] || {
+    ok=false
+    err="${err}wmem_max "
+  }
+  [ "$(sysctl -n net.core.default_qdisc 2>/dev/null)" = "fq" ] || {
+    ok=false
+    err="${err}default_qdisc "
+  }
+  [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" = "bbr" ] || {
+    ok=false
+    err="${err}tcp_congestion_control "
+  }
+  [ "$(sysctl -n net.ipv4.tcp_limit_output_bytes 2>/dev/null)" = "4194304" ] || {
+    ok=false
+    err="${err}tcp_limit_output_bytes "
+  }
 
   if [ -d /etc/sysctl.d ] && [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
     {

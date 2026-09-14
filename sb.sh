@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# 运行期全局配置（PROJECT_NAME 及以下变量）由 lib/*.sh 各模块消费，
+# 跨文件引用 shellcheck 不可见，文件级豁免 SC2034（unused）。
+# shellcheck disable=SC2034
 set -eEuo pipefail
 
 umask 077
@@ -58,7 +61,6 @@ setup_common_traps
 
 has_systemd=false
 has_openrc=false
-
 
 # 职责模块（lib/*.sh）：开发态先找 SCRIPT_DIR/lib，安装态回退 LIB_DIR
 for _sbm_module in ui core nodes menu; do

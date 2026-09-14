@@ -264,6 +264,7 @@ export key_path="${cpair#*|}"
 assert_eval_true "custom 证书经环境变量正确导入" 'auto_cert_bundle ctest2 www.bing.com | grep -q "^custom|"'
 unset cert cert_path key_path
 # v1.2.5：cert_b64/key_b64 直接粘贴 PEM 内容（base64）导入
+# shellcheck disable=SC2034 # 结果在下方 assert_eval_true 的 eval 字符串内消费
 b64pair="$(ensure_tls_material certb64 www.bing.com)"
 assert_eval_true "cert_b64/key_b64 内容导入为 custom" 'export cert=custom cert_b64="$(base64 -w0 <"${b64pair%|*}")" key_b64="$(base64 -w0 <"${b64pair#*|}")"; auto_cert_bundle ctest3 www.bing.com | grep -q "^custom|"'
 unset cert cert_b64 key_b64
@@ -275,6 +276,7 @@ wipe_records
 json_set_record "${NODES_FILE}" "bk" '{"protocol":"socks5","name":"BK","port":1234,"username":"u"}'
 json_set_record "${SECRETS_FILE}" "bk" '{"password":"p"}'
 mkdir -p "${CERT_DIR}" && printf 'CERT' >"${CERT_DIR}/bk.crt" && printf 'KEY' >"${CERT_DIR}/bk.key"
+# shellcheck disable=SC2034 # 结果在下方 assert_eval_true 的 eval 字符串内消费
 bkp_dir="$(backup_state)"
 assert_eval_true "备份目录名唯一（随机+进程后缀, 审查 F-09）" '[[ "${bkp_dir}" =~ [0-9]{4}-[0-9]+$ ]]'
 assert_eval_true "备份含证书文件（审查 F-02）" '[ -f "${bkp_dir}/certs/bk.crt" ] && [ -f "${bkp_dir}/certs/bk.key" ]'
@@ -520,7 +522,27 @@ assert_eval_true "anytls TFO 默认开" 'jq -e ".inbounds[] | select(.type == \"
 assert_eval_true "socks TFO 默认开" 'jq -e ".inbounds[] | select(.type == \"socks\" and .tcp_fast_open == true)" "${CONFIG_FILE}" >/dev/null'
 assert_eval_true "WS inbound 全局带 0-RTT" 'jq -e ".inbounds[] | select(.transport.type? == \"ws\" and .transport.max_early_data == 2048 and .transport.early_data_header_name == \"Sec-WebSocket-Protocol\")" "${CONFIG_FILE}" >/dev/null'
 assert_eval_true "HY2 限速 100/300 写入" 'jq -e ".inbounds[] | select(.type == \"hysteria2\" and .up_mbps == 100 and .down_mbps == 300)" "${CONFIG_FILE}" >/dev/null'
-assert_eval_true "sing-box stub 已启动" 'pid="$(read_pid_file "${PID_FILE}")"; [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null'
+# stub 进程存活仅对"纯进程托管"环境有意义：systemd/openrc 下 sing-box 由系统管理器
+# 托管且不写 PID 文件（GitHub 托管 runner 即 systemd 环境），断言按环境跳过。
+detect_systemd
+# shellcheck disable=SC2154  # has_systemd/has_openrc 由 detect_systemd 赋值
+if [ "${has_systemd}" = false ] && [ "${has_openrc}" = false ]; then
+  _stub_pid="$(read_pid_file "${PID_FILE}" 2>/dev/null || true)"
+  if [ -n "${_stub_pid}" ] && kill -0 "${_stub_pid}" 2>/dev/null; then
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+    printf 'FAIL (应为真): sing-box stub 已启动 (pid=%s)\n' "${_stub_pid:-<空>}" >&2
+    printf '  PID_FILE=%s\n' "${PID_FILE}" >&2
+    sed 's/^/  content: /' "${PID_FILE}" 2>/dev/null >&2 || true
+    if [ -n "${_stub_pid}" ]; then
+      ps -o pid,ppid,stat,comm,args -p "${_stub_pid}" 2>&1 | sed 's/^/  ps: /' >&2 || true
+    fi
+    pgrep -af "sing-box|sleep 300" 2>&1 | sed 's/^/  pgrep: /' >&2 || true
+  fi
+else
+  printf '[提示] has_systemd=%s has_openrc=%s：跳过 stub 进程存活断言\n' "${has_systemd}" "${has_openrc}" >&2
+fi
 
 # S4：sing-box check 失败时拒写配置（fail-closed，保留旧配置）
 cp "${CONFIG_FILE}" "${TEST_ROOT}/config.before"
@@ -561,10 +583,8 @@ kill_pid_file "${PID_FILE}" || true
 export MTP_TEST_MODE=1
 source "${ROOT_DIR}/mtp.sh"
 
-# 配置可覆盖为沙箱路径（不触碰真实 /opt/mtproxy）
-MTP_WORKDIR="${TEST_ROOT}/mtproxy"
-MTP_BIN_DIR="${MTP_WORKDIR}/bin"
-MTP_CONF="${MTP_WORKDIR}/go.conf"
+# MTProxy 纯函数验证（generate_secret/random_domain/valid_port/mtp_tg_secret）不读写 /opt/mtproxy，
+# 无需沙箱覆盖 MTP_WORKDIR。
 
 assert_eval_true "generate_secret 输出 32 位 hex" 's="$(generate_secret)"; [[ "$s" =~ ^[0-9a-f]{32}$ ]]'
 assert_eval_true "random_domain 命中内置列表" 'd="$(random_domain)"; printf "%s\n" "${MTP_FAKE_DOMAINS[@]}" | grep -qx "$d"'

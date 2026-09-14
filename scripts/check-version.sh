@@ -34,7 +34,7 @@ bundle_name="singbox-manager-v${version_file}.tar.gz"
 actual="$(sha256sum "dist/${bundle_name}" | awk '{print $1}')"
 pinned="$(grep -m1 '^PACKAGE_SHA256=' install.sh | grep -o '[a-f0-9]\{64\}')"
 [ -n "${pinned}" ] || fail "install.sh 未找到 PACKAGE_SHA256"
-[ "${actual}" = "${pinned}" ] || fail "install.sh 内嵌校验值(${pinned}) 与实际 bundle(${actual}) 不一致"
+[ "${actual}" = "${pinned}" ] || fail "install.sh 内嵌校验值(${pinned}) 与实际 bundle(${actual}) 不一致（注：Git-for-Windows/MSYS 对含 shebang 的脚本强制可执行位且 chmod 无法清除，此类主机本地构建的 lib/*.sh 恒为 0755，无法与 Linux 构建字节对齐——属宿主限制，门禁以 release 构建平台 ubuntu CI 为准）"
 
 # checksums.txt 必须是 "hash␣␣文件名" 归一化格式（无 * 二进制标记）
 expected_line="${actual}  ${bundle_name}"
@@ -61,5 +61,7 @@ if ! diff -q interface/worker.js "${tmp_iface}/worker.js" >/dev/null; then
 fi
 rm -rf "${tmp_iface}"
 
+raw_hash="$(gzip -dc "dist/${bundle_name}" | sha256sum | awk '{print $1}')"
 rm -rf dist
 echo "一致性校验通过：v${version_file} / ${actual:0:12}..."
+echo "可复现性：tar=$(tar --version | head -n1 | sed -E 's/.*\) ([0-9.]+).*/\1/') gzip=$(gzip --version | head -n1 | awk '{print $2}') 未压缩tar=${raw_hash}"

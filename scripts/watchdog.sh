@@ -106,7 +106,7 @@ ensure_singbox() {
       local probe_fail
       probe_fail_file="${RUNTIME_DIR}/probe_fail_count"
       if [ -f "${probe_fail_file}" ]; then
-        probe_fail="$(cat "${probe_fail_file}" 2>/dev/null | tr -dc '0-9' || true)"
+        probe_fail="$(tr -dc '0-9' <"${probe_fail_file}" 2>/dev/null || true)"
       fi
       probe_fail="${probe_fail:-0}"
       probe_fail=$((probe_fail + 1))
@@ -229,7 +229,7 @@ ensure_argo_nodes() {
       backoff="$(argo_backoff_delay "${restarts}")"
       restart_at_file="${RUNTIME_DIR}/${tag}.restart_at"
       if [ -f "${restart_at_file}" ]; then
-        last_restart="$(cat "${restart_at_file}" 2>/dev/null | tr -dc '0-9' | head -c 12 || true)"
+        last_restart="$(tr -dc '0-9' <"${restart_at_file}" 2>/dev/null | head -c 12 || true)"
         last_restart="${last_restart:-0}"
         now="$(date +%s 2>/dev/null || echo 0)"
         if [ -n "${now}" ] && [ $((now - last_restart)) -lt "${backoff}" ]; then
