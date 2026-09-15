@@ -3,6 +3,32 @@ set -eEuo pipefail
 
 umask 077
 
+# 9.5：多源探测响应归一化——裸 IP 直接返回，否则优先 grep IPv4/IPv6，再尝试 JSON 字段。
+# 兼容 icanhazip/ipify(裸 IP)、ifconfig.me/ip(裸 IP)、4.ipw.cn(裸 IP)、
+# ip.3322.net(文本)、cip.cc(HTML 文本)、myip.ipip.net(文本"当前 IP：…")。
+extract_public_ip() {
+  local raw="$1" m ip
+  [ -n "${raw}" ] || return 1
+  raw="$(printf '%s' "${raw}" | tr -d '\r\n\t ')"
+  if is_ip_address "${raw}"; then
+    printf '%s' "${raw}"
+    return 0
+  fi
+  if command_exists grep; then
+    m="$(printf '%s' "${raw}" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}|(([0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{0,4})' | grep -vE '^(0\.0\.0\.0|::|0::|::0|127\.)' | head -1 2>/dev/null || true)"
+    if is_ip_address "${m}"; then
+      printf '%s' "${m}"
+      return 0
+    fi
+  fi
+  ip="$(printf '%s' "${raw}" | jq -r '.ip // .IpAddr // .ipaddr // .address // .data // empty' 2>/dev/null | tr -d '\r\n' || true)"
+  if is_ip_address "${ip}" && ! is_private_ip "${ip}"; then
+    printf '%s' "${ip}"
+    return 0
+  fi
+  return 1
+}
+
 get_public_ip() {
   local ip ipver flag url
   local cached cached_ts now ttl cached_ver
@@ -39,17 +65,26 @@ get_public_ip() {
     families=(6 4)
   fi
 
-  # A1：同族多源并行探测（SBM_IP_PROBE_PARALLEL=0 回退串行），首个合法公网 IP 即回，
+  # A1/9.5：同族多源并行探测（SBM_IP_PROBE_PARALLEL=0 回退串行）。IPv4 含境内可达源
+  # （4.ipw.cn / ip.3322.net / myip.ipip.net / cip.cc），首个合法公网 IP 即回，
   # 冷启动最坏耗时从 4×5s 降到 ≈5s（每 curl --max-time 5 为硬上限）。
   local -a probe_urls=()
   local probe_tmp rawip _u _i _f
   for ipver in "${families[@]}"; do
     if [ "${ipver}" = "4" ]; then
       flag="--ipv4"
-      probe_urls=("https://api.ipify.org" "https://ipv4.icanhazip.com")
+      probe_urls=(
+        "https://api.ipify.org"
+        "https://ipv4.icanhazip.com"
+        "https://4.ipw.cn"
+        "https://ip.3322.net"
+        "https://ifconfig.me/ip"
+        "https://myip.ipip.net"
+        "https://cip.cc"
+      )
     else
       flag="--ipv6"
-      probe_urls=("https://api64.ipify.org" "https://ipv6.icanhazip.com")
+      probe_urls=("https://api64.ipify.org" "https://ipv6.icanhazip.com" "https://ifconfig.me/ip")
     fi
 
     if [ "${SBM_IP_PROBE_PARALLEL:-1}" = "1" ] && [ "${#probe_urls[@]}" -gt 1 ]; then
@@ -65,8 +100,7 @@ get_public_ip() {
       wait || true
       for _f in "${probe_tmp}"/*; do
         [ -f "${_f}" ] || continue
-        rawip="$(tr -d '\r\n' <"${_f}" 2>/dev/null || true)"
-        if is_ip_address "${rawip}" && ! is_private_ip "${rawip}"; then
+        if rawip="$(extract_public_ip "$(tr -d '\r\n' <"${_f}" 2>/dev/null || true)")"; then
           rm -rf "${probe_tmp}"
           PUBLIC_IP_CACHE="${rawip}"
           set_setting "public_ip" "${rawip}"
@@ -79,8 +113,7 @@ get_public_ip() {
       rm -rf "${probe_tmp}"
     else
       for url in "${probe_urls[@]}"; do
-        ip="$(curl -fsS --max-time 5 ${flag} "$url" 2>/dev/null | tr -d '\r\n' || true)"
-        if is_ip_address "$ip" && ! is_private_ip "$ip"; then
+        if ip="$(extract_public_ip "$(curl -fsS --max-time 5 ${flag} "$url" 2>/dev/null | tr -d '\r\n' || true)")"; then
           PUBLIC_IP_CACHE="$ip"
           set_setting "public_ip" "$ip"
           set_setting "public_ip_version" "${ipver}"
@@ -171,8 +204,11 @@ any_node_port_alive() {
     if [ "${#jobs[@]}" -eq 0 ]; then
       return 1
     fi
-    for port in "${jobs[@]}"; do
-      wait "${port}" 2>/dev/null && _status=0 || true
+    for job in "${jobs[@]}"; do
+      if wait "${job}" 2>/dev/null; then
+        _status=0
+        break
+      fi
     done
     [ "${_status}" = 0 ] && return 0
     return 1
@@ -223,6 +259,78 @@ has_public_ipv4() {
   return 1
 }
 
+# 3.2：判定本机是否具备公网 IPv6（任一可达探测源返回合法公网 IPv6）。
+has_public_ipv6() {
+  local ip
+  ip="$(curl -fsS --max-time 5 --ipv6 "https://api64.ipify.org" 2>/dev/null | tr -d '\r\n' || true)"
+  if is_ip_address "${ip}" && ! is_private_ip "${ip}"; then
+    return 0
+  fi
+  ip="$(curl -fsS --max-time 5 --ipv6 "https://ifconfig.me/ip" 2>/dev/null | tr -d '\r\n' || true)"
+  is_ip_address "${ip}" && ! is_private_ip "${ip}"
+}
+
+# 5.2：UDP(QUIC) 类节点协议 —— TCP 探活不适用于它们，改用端口绑定检测。
+udp_probeable_protocol() {
+  local protocol="$1"
+  case "${protocol}" in
+  hy2 | tuic-v5) return 0 ;;
+  esac
+  return 1
+}
+
+# 5.2：指定 UDP 端口是否已在监听（ss -lun / netstat -lun 通配与具体地址均算命中）。
+# 无检测工具的环境无法验证，视为健康（避免误判触发假阳性重启）。
+udp_port_binding_alive() {
+  local port="$1"
+  [[ "${port}" =~ ^[0-9]+$ ]] || return 1
+  if command_exists ss; then
+    ss -lunH 2>/dev/null | awk -v p="${port}" '$4 ~ ":" p "$" { found=1 } END { exit found ? 0 : 1 }'
+    return $?
+  elif command_exists netstat; then
+    netstat -lun 2>/dev/null | awk -v p="${port}" '$4 ~ ":" p "$" { found=1 } END { exit found ? 0 : 1 }'
+    return $?
+  fi
+  return 0
+}
+
+# 5.2：任意 UDP 端口是否已绑定（hy2/tuic）。全部未绑定则判定数据面假活。
+any_udp_port_bound() {
+  local tag port protocol found=0
+  [ -f "${NODES_FILE}" ] || return 1
+  while IFS= read -r tag; do
+    [ -n "${tag}" ] || continue
+    protocol="$(node_value "$tag" "protocol" 2>/dev/null || true)"
+    if ! udp_probeable_protocol "${protocol}"; then
+      continue
+    fi
+    port="$(node_value "$tag" "port" 2>/dev/null || true)"
+    [ -n "${port}" ] || continue
+    if udp_port_binding_alive "${port}"; then
+      found=1
+      break
+    fi
+  done < <(iter_node_tags)
+  [ "${found}" = 1 ] && return 0
+  return 1
+}
+
+# 5.2：当前 UDP(QUIC) 可绑定节点数量（hy2/tuic，无节点或非 UDP 时输出 0）。
+udp_node_count() {
+  local cnt=0
+  [ -f "${NODES_FILE}" ] || {
+    printf '0'
+    return 0
+  }
+  local tag protocol _port _argo
+  while IFS=$'\t' read -r tag protocol _port _argo; do
+    [ -n "${tag}" ] || continue
+    if udp_probeable_protocol "${protocol}"; then
+      cnt=$((cnt + 1))
+    fi
+  done < <(node_meta_bulk)
+  printf '%s' "${cnt}"
+}
 
 invalidate_port_caches() {
   _METADATA_PORTS=""
@@ -267,4 +375,3 @@ port_available() {
   fi
   return 0
 }
-

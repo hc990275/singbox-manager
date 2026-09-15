@@ -90,9 +90,8 @@ net_tune_display_values() {
 }
 
 net_tune_apply_manual() {
-  local bandwidth="$1" latency="$2" region cap_mb buffer_mb buffer_bytes
+  local bandwidth="$1" latency="$2" region buffer_mb buffer_bytes
   region="$(infer_net_tune_region "${latency}")"
-  cap_mb="$(get_tcp_buffer_cap_mb)"
   buffer_mb="$(calculate_net_tune_buffer_mb "${bandwidth}" "${region}")"
   set_setting "net_tune_bandwidth_mbps" "${bandwidth}"
   set_setting "net_tune_latency_ms" "${latency}"
@@ -101,6 +100,7 @@ net_tune_apply_manual() {
   buffer_bytes=$((buffer_mb * 1024 * 1024))
   if [ "$(id -u 2>/dev/null || echo 1)" = "0" ] && command_exists sysctl; then
     apply_sysctls "${buffer_bytes}"
+    apply_sysctls_extra
   fi
   print_ok "已应用：带宽 ${COLOR_NUM_HL}${bandwidth}${COLOR_RESET} Mbps，延迟 ${COLOR_NUM_HL}${latency}${COLOR_RESET} ms（${region} 档）→ TCP 缓冲 ${COLOR_NUM_HL}${buffer_mb}${COLOR_RESET}MB。"
 }
@@ -253,7 +253,6 @@ MTProxy（Go mtg）为独立脚本，不依赖本命令：
 EOF
 }
 
-
 prompt_with_default() {
   local prompt="$1"
   local default="$2"
@@ -358,4 +357,3 @@ prompt_port() {
     return 0
   done
 }
-

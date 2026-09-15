@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# openrc 模板内的 PID_FILE 为模板变量（定义于 sb.sh），按要求豁免 SC2153。
+# shellcheck disable=SC2153
 set -eEuo pipefail
 
 umask 077
@@ -129,7 +131,6 @@ go_mem_limit_value() {
   printf '%sMiB' "${mb}"
 }
 
-
 systemd_available() {
   command_exists systemctl && [ -d /run/systemd/system ]
 }
@@ -190,7 +191,6 @@ ${memory_max_line}
 ${nofile_line}
 ExecStart=${SINGBOX_BIN} run -c ${CONFIG_FILE}
 Restart=on-failure
-RestartSec=3
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
@@ -205,6 +205,19 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
+# 5.1：纵深加固——系统调用白名单裁剪 + EPERM 静默 + 能力边界只留网络授权；
+#   地址族收窄（AF_NETLINK 为 auto_detect_interface 路由探测所需保留）
+SystemCallFilter=@system-service
+SystemCallFilter=~@chown
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+OOMPolicy=kill
+OOMScoreAdjust=-100
+RestartSteps=10
+RestartSec=3
+MemorySwapMax=0
 ReadWritePaths=${BASE_DIR}
 
 [Install]
@@ -436,17 +449,18 @@ await_tcp_ports() {
 # 未监听时明确报出端口（端口冲突/绑定失败定位）；纯 UDP（hy2/tuic）节点
 # 与全 UDP 部署跳过（TCP 探活不适用，进程存活由 watchdog 保证）。
 verify_data_plane_ready() {
-  local tag protocol ports="" tcp_count
+  # 全节点仅需 protocol/port 两字段：用 node_meta_bulk 一次 jq 拿到（9.3 jq 批量化）
+  # 字段顺序同 node_value：protocol / port
+  local tag protocol port ports="" tcp_count
   [ -f "${NODES_FILE}" ] || return 0
-  while IFS= read -r tag; do
+  while IFS=$'\t' read -r tag protocol port; do
     [ -n "${tag}" ] || continue
-    protocol="$(node_value "$tag" "protocol")"
     case "${protocol}" in
     vless-reality | vless-ws-tls | anytls | vless-argo | socks5)
-      ports="${ports} $(node_value "$tag" "port")"
+      ports="${ports} ${port}"
       ;;
     esac
-  done < <(iter_node_tags)
+  done < <(node_meta_bulk)
   tcp_count="$(tcp_probeable_node_count)"
   if [ "${tcp_count}" -eq 0 ]; then
     print_info "当前无 TCP 类入站节点（均为 UDP 或空），跳过端口就绪探活。"
@@ -506,4 +520,3 @@ ensure_singbox_ready() {
     install_core
   fi
 }
-

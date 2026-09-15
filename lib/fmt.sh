@@ -86,11 +86,9 @@ wrap_host() {
   fi
 }
 
-
 normalize_input() {
   local value="$1"
   printf '%s' "$value" |
     tr -d '\000-\037\177' |
     sed -e 's/\r//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
-

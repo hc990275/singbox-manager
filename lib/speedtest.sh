@@ -59,7 +59,16 @@ ensure_ookla_speedtest() {
 }
 
 run_speedtest() {
-  local bin="$1" out up
+  local bin="$1" out up json_up
+  # 9.1：优先 JSON 输出（bandwidth 为 bit/s，/1e6 得 Mbps），解析失败回退人类文本
+  out="$("${bin}" --accept-license --accept-gdpr --output-type=json 2>/dev/null || true)"
+  if [ -n "${out}" ]; then
+    json_up="$(printf '%s' "${out}" | jq -r '.upload.bandwidth // empty' 2>/dev/null || true)"
+    if [[ "${json_up}" =~ ^[0-9]+$ ]] && [ "${json_up}" -gt 0 ]; then
+      printf '%s' "$((json_up / 1000000))"
+      return 0
+    fi
+  fi
   out="$("${bin}" --accept-license --accept-gdpr 2>&1 || true)"
   up="$(printf '%s' "${out}" | sed -nE 's/.*[Uu]pload:[[:space:]]*([0-9]+(\.[0-9]+)?).*/\1/p' | head -n1)"
   if [[ "${up}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && ! printf '%s' "${out}" | grep -qi 'FAILED\|error'; then
@@ -70,7 +79,19 @@ run_speedtest() {
 }
 
 run_speedtest_metrics() {
-  local bin="$1" out up lat
+  local bin="$1" out up lat json_up json_lat
+  # 9.1：JSON 输出读取 upload.bandwidth（bit/s，/1e6 得 Mbps）与 ping.latency（ms），
+  # 解析失败回退人类文本（老版本/受限环境）
+  out="$("${bin}" --accept-license --accept-gdpr --output-type=json 2>/dev/null || true)"
+  if [ -n "${out}" ]; then
+    json_up="$(printf '%s' "${out}" | jq -r '.upload.bandwidth // empty' 2>/dev/null || true)"
+    if [[ "${json_up}" =~ ^[0-9]+$ ]] && [ "${json_up}" -gt 0 ]; then
+      json_lat="$(printf '%s' "${out}" | jq -r '.ping.latency // empty' 2>/dev/null || true)"
+      [[ "${json_lat}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || json_lat=""
+      printf '%s %s' "$((json_up / 1000000))" "${json_lat%.*}"
+      return 0
+    fi
+  fi
   out="$("${bin}" --accept-license --accept-gdpr 2>&1 || true)"
   up="$(printf '%s' "${out}" | sed -nE 's/.*[Uu]pload:[[:space:]]*([0-9]+(\.[0-9]+)?).*/\1/p' | head -n1)"
   lat="$(printf '%s' "${out}" | sed -nE 's/.*[Ll]atency:[[:space:]]*([0-9]+(\.[0-9]+)?).*/\1/p' | head -n1)"
@@ -171,4 +192,3 @@ net_tune_confirm_measurement() {
   done
   printf '%s %s' "${bandwidth}" "${latency}"
 }
-

@@ -91,10 +91,19 @@ assert_eq "normalize_input 去首尾空白" "hello" "$(normalize_input "  hello 
 assert_eq "normalize_input 删除控制字符" "abcd" "$(normalize_input "$(printf 'ab\tc\rd')")"
 
 # --- env_var（纯 bash 实现，语义对齐 normalize_input） ---
-assert_eq "env_var 修剪首尾空白" "hi" "$(ENV_TEST_X="  hi  "; env_var ENV_TEST_X)"
+assert_eq "env_var 修剪首尾空白" "hi" "$(
+  ENV_TEST_X="  hi  "
+  env_var ENV_TEST_X
+)"
 # shellcheck disable=SC2034 # 供 env_var 读取的环境变量，仅存在于子 shell 内
-assert_eq "env_var 剔除控制字符/CR" "abcd" "$(ENV_TEST_X="$(printf 'ab\tc\rd')"; env_var ENV_TEST_X)"
-assert_eq "env_var 未设置返回空" "" "$(unset ENV_TEST_X; env_var ENV_TEST_X)"
+assert_eq "env_var 剔除控制字符/CR" "abcd" "$(
+  ENV_TEST_X="$(printf 'ab\tc\rd')"
+  env_var ENV_TEST_X
+)"
+assert_eq "env_var 未设置返回空" "" "$(
+  unset ENV_TEST_X
+  env_var ENV_TEST_X
+)"
 
 # --- 端口与环境变量解析 ---
 assert_eval_true "env_port 合法端口" 'vlrt=2083; [ "$(env_port vlrt)" = "2083" ]'
@@ -164,6 +173,43 @@ render_inbound_for_tag n1 >"${tmpcfg}" 2>/dev/null
 assert_eval_true "Reality inbound 用 node_meta 的 uuid/private_key" 'jq -e ".users[0].uuid == \"uuid-1111\" and .tls.reality.private_key == \"priv_test\" and .tls.reality.short_id[0] == \"abcd\"" "${tmpcfg}" >/dev/null'
 rm -f "${tmpcfg}"
 
+# 3.1：multi short_id——逗号分隔渲染为 short_id 数组，非法项被过滤
+json_set_record "${NODES_FILE}" "nmulti" '{"protocol":"vless-reality","name":"Multi","port":443,"public_key":"pbk_x","short_id":"ab01,cd02,ef03"}'
+json_set_record "${SECRETS_FILE}" "nmulti" '{"uuid":"u-1","private_key":"pk_x"}'
+tmpcfg="$(mktemp "${TEST_ROOT}/cfg.XXXXXX")"
+render_inbound_for_tag nmulti >"${tmpcfg}" 2>/dev/null
+assert_eval_true "multi short_id 渲染为数组" 'jq -e ".tls.reality.short_id == [\"ab01\",\"cd02\",\"ef03\"]" "${tmpcfg}" >/dev/null'
+rm -f "${tmpcfg}"
+assert_eval_true "resolve_short_ids 过滤非法项(保持大小写规范)" '[ "$(resolve_short_ids "AB01,xyz,cd0,EF02")" = "ab01,ef02" ]'
+assert_eval_false "resolve_short_ids 全非法返回失败" 'resolve_short_ids "zz,123,x0"'
+assert_eval_false "resolve_short_ids 空返回失败" 'resolve_short_ids ""'
+json_delete_record "${NODES_FILE}" "nmulti"
+json_delete_record "${SECRETS_FILE}" "nmulti"
+
+# 9.5：多源探测响应归一化（裸 IP / 文本 / JSON 字段）
+assert_eq "extract_public_ip 裸 IP 直通" "1.2.3.4" "$(extract_public_ip "  1.2.3.4  ")"
+assert_eq "extract_public_ip 文本含 IP" "203.0.113.9" "$(extract_public_ip "当前 IP：203.0.113.9 来自于：北京市 电信")"
+assert_eq "extract_public_ip JSON data 字段" "198.51.100.7" "$(extract_public_ip '{"ip":"198.51.100.7","detail":"x"}')"
+assert_eval_false "extract_public_ip 无 IP 返回失败" 'extract_public_ip "no ip here"'
+
+# 1.2：clash_api 开关/端口/secret 持久化
+assert_eval_true "clash_api 默认开启" 'clash_api_enabled'
+assert_eval_false "clash_api=0 关闭" 'clash_api=0 clash_api_enabled'
+assert_eval_false "clash_api=off 关闭" 'clash_api=off clash_api_enabled'
+assert_eq "clash_api_port 默认 19990" "19990" "$(clash_api_port)"
+assert_eq "clash_api_port 非法回退默认" "19990" "$(clash_api_port=abc clash_api_port)"
+assert_eval_true "clash_api_secret 生成并持久化" '
+  s1="$(ensure_clash_api_secret)"
+  s2="$(ensure_clash_api_secret)"
+  [ -n "$s1" ] && [ "$s1" = "$s2" ] && [ "$(get_setting clash_api_secret)" = "$s1" ] && [ "${#s1}" -ge 16 ]'
+assert_eval_true "clash_api=0 不渲染 experimental.clash_api" '
+  clash_api=off render_experimental_object | jq -e ".experimental.clash_api == null and .experimental.cache_file.enabled == true" >/dev/null'
+assert_eval_true "clash_api 默认渲染 experimental.clash_api" '
+  clash_api="" render_experimental_object | jq -e ".experimental.clash_api.secret != null and (.experimental.clash_api.external_controller | startswith(\"127.0.0.1:\"))" >/dev/null'
+# 1.2：clash_api 关闭时 render_config 不产 experimental.clash_api，开启时含之
+assert_eval_true "clash_api e2e: off 态 config 无 clash_api" 'clash_api=off render_config; jq -e ".experimental | (has(\"clash_api\") | not)" "${CONFIG_FILE}" >/dev/null'
+assert_eval_true "clash_api e2e: 默认态 config 含 clash_api + cache_file" 'clash_api="" render_config; jq -e ".experimental.clash_api and .experimental.cache_file.enabled" "${CONFIG_FILE}" >/dev/null'
+
 # --- 分享链接 ---
 assert_eval_true "Reality 链接含 reality 参数" 'build_share_link n1 | grep -q "security=reality"'
 assert_eval_true "Reality 链接含缓存公网 IP" 'build_share_link n1 | grep -q "203.0.113.10:443"'
@@ -171,6 +217,19 @@ assert_eval_true "Reality 链接含缓存公网 IP" 'build_share_link n1 | grep 
 json_set_record "${NODES_FILE}" "n2" '{"protocol":"hy2","name":"Hysteria2","port":11443,"tls_server":"www.bing.com","certificate_mode":"self-signed"}'
 json_set_record "${SECRETS_FILE}" "n2" '{"password":"pw123"}'
 assert_eval_true "hy2 自签无指纹时回退 insecure=1" 'build_share_link n2 | grep -q "insecure=1"'
+
+# 9.3：node_meta_bulk —— 批量输出各节点 tag/protocol/port/argo_mode（TSV）
+# 5.2：UDP 探活协议识别与节点计数（纯函数；ss/netstat 存在时测端口绑定回退语义）
+assert_eval_true "node_meta_bulk 覆盖 n1/n2" 'c="$(node_meta_bulk)"; printf %s "$c" | grep -q "n1.vless-reality.443." && printf %s "$c" | grep -q "n2.hy2.11443."'
+assert_eval_true "udp_probeable_protocol hy2 识别" 'udp_probeable_protocol hy2'
+assert_eval_true "udp_probeable_protocol tuic-v5 识别" 'udp_probeable_protocol tuic-v5'
+assert_eval_false "udp_probeable_protocol 非UDP 拒绝" 'udp_probeable_protocol vless-reality'
+assert_eval_true "udp_node_count 含 n2(hy2)" '[ "$(udp_node_count)" -ge 1 ]'
+if command_exists ss || command_exists netstat; then
+  assert_eval_false "udp_port_binding_alive 未占用端口为假" 'udp_port_binding_alive 55338'
+else
+  printf '[提示] 无 ss/netstat：跳过 udp_port_binding_alive 端口级断言\n' >&2
+fi
 
 json_set_record "${NODES_FILE}" "n2b" '{"protocol":"hy2","name":"Hysteria2-Pin","port":11444,"tls_server":"www.bing.com","certificate_mode":"self-signed","certificate_path":"cert"}'
 json_set_record "${SECRETS_FILE}" "n2b" '{"password":"pw123"}'
@@ -266,7 +325,8 @@ if [ -d /proc ] && command -v sleep >/dev/null 2>&1; then
   _pb="${TEST_ROOT}/.pidbin"
   cp /bin/sleep "${_pb}" 2>/dev/null || cp "$(dirname "$(command -v sleep)")/sleep" "${_pb}"
   chmod +x "${_pb}"
-  "${_pb}" 30 & _pb_pid=$!
+  "${_pb}" 30 &
+  _pb_pid=$!
   sleep 0.2
   rm -f "${_pb}"
   # MSYS 下 /proc/PID/exe 与 Windows 风格路径无法对等模拟原地替换，仅 Linux 上断言 (deleted)
@@ -279,6 +339,22 @@ fi
 
 # --- 自签证书与回退逻辑 ---
 assert_eval_true "ensure_tls_material 生成证书" 'pair="$(ensure_tls_material tag_tls www.bing.com)"; [ -f "${pair%|*}" ] && [ -f "${pair#*|}" ]'
+# 9.4：优先 ECDSA P-256；OpenSSL 不支持 EC 的环境回退 RSA-2048
+if openssl ecparam -name prime256v1 -check >/dev/null 2>&1; then
+  assert_eval_true "自签证书优先 ECDSA P-256" 'openssl x509 -in "${CERT_DIR}/tag_tls.crt" -noout -text 2>/dev/null | grep -q "prime256v1"'
+else
+  assert_eval_true "无 EC 支持时回退 RSA-2048" 'openssl x509 -in "${CERT_DIR}/tag_tls.crt" -noout -text 2>/dev/null | grep -qE "rsaEncryption|RSA Public Key"'
+fi
+assert_eval_true "自签证书含 SAN(DNS)" 'openssl x509 -in "${CERT_DIR}/tag_tls.crt" -noout -ext subjectAltName 2>/dev/null | grep -q "www.bing.com"'
+# 9.2：证书指纹进程级缓存（同证书重复计算幂等）
+assert_eval_true "cert_fingerprint 输出 64 位 hex" 'fp="$(cert_fingerprint "${CERT_DIR}/tag_tls.crt")"; [[ "${fp}" =~ ^[0-9a-f]{64}$ ]]'
+assert_eval_true "cert_fingerprint 缓存命中幂等" '
+  out="$(
+    cert_fingerprint "${CERT_DIR}/tag_tls.crt" >/dev/null
+    cert_fingerprint "${CERT_DIR}/tag_tls.crt" >/dev/null
+    printf "%s" "${#CERT_FP_CACHE[@]}"
+  )"
+  [ "${out}" -ge 1 ]'
 assert_eval_true "auto_cert_bundle 默认自签" 'auto_cert_bundle t_auto www.bing.com | grep -q "^self-signed|"'
 assert_eval_false "auto_cert_bundle custom 缺路径回退自签" 'unset cert_path key_path; cert=custom; auto_cert_bundle t_c www.bing.com | grep -q "^custom|"'
 # 回归：cert_path/key_path 环境变量不再被局部变量遮蔽
@@ -393,9 +469,9 @@ json_set_record "${SECRETS_FILE}" "nws-tune" '{"uuid":"ut"}'
 
 # P2/P3：渲染单 outbound 直接校验（写 stdout，不依赖 CONFIG_FILE）
 tmpcfg="$(mktemp "${TEST_ROOT}/cfg.XXXXXX")"
-( tcp_fast_open=0 render_inbound_for_tag nws-tune ) >"${tmpcfg}" 2>/dev/null
+(tcp_fast_open=0 render_inbound_for_tag nws-tune) >"${tmpcfg}" 2>/dev/null
 assert_eval_true "tcp_fast_open=false 渲染进 inbound" 'jq -e ".tcp_fast_open == false" "${tmpcfg}" >/dev/null'
-( tcp_fast_open=1 render_inbound_for_tag nws-tune ) >"${tmpcfg}" 2>/dev/null
+(tcp_fast_open=1 render_inbound_for_tag nws-tune) >"${tmpcfg}" 2>/dev/null
 assert_eval_true "tcp_fast_open=true 渲染进 inbound" 'jq -e ".tcp_fast_open == true" "${tmpcfg}" >/dev/null'
 assert_eval_true "WS inbound 带 0-RTT early data 字段" 'jq -e ".transport.max_early_data == 2048 and .transport.early_data_header_name == \"Sec-WebSocket-Protocol\"" "${tmpcfg}" >/dev/null'
 rm -f "${tmpcfg}"
@@ -436,10 +512,14 @@ tcp_keep_alive_interval=abc render_inbound_for_tag nws-tune >"${tmpcfg}" 2>/dev/
 assert_eval_true "B3 非法间隔回退 30s" 'jq -e ".tcp_keep_alive_interval == \"30s\"" "${tmpcfg}" >/dev/null'
 rm -f "${tmpcfg}"
 
-# --- B4：DNS 块开关（默认关闭；dns_servers 渲染；非法 scheme 不渲染） ---
+# --- B4/4.2：DNS 块（默认开启双源加密 DNS；dns_servers=off/none 整体关闭；
+#   strategy 跟随 ip_version；非法 scheme 不渲染） ---
 # 注意：env 赋值一律用“前缀+命令”形式，避免 eval 在顶层残留变量污染后续 render_config
-assert_eq "B4 dns_servers 空 => {}" "{}" "$(render_dns_object)"
-assert_eval_true "B4 dns_servers 双源渲染 dns 块" '( dns_servers="https://1.1.1.1/dns-query,https://dns.google/resolve" render_dns_object ) | jq -e "(.dns.servers | length) == 2 and .dns.independent_cache == true and .dns.strategy == \"ipv4_only\""'
+assert_eval_true "B4 dns_servers 空 => 默认双源加密 DNS" '( render_dns_object ) | jq -e "(.dns.servers | length) == 2 and .dns.independent_cache == true and .dns.disable_cache == false and .dns.cache_capacity == 4096 and .dns.strategy == \"prefer_ipv4\""'
+assert_eval_true "B4 双源显式渲染 dns 块" '( dns_servers="https://1.1.1.1/dns-query,https://dns.google/resolve" render_dns_object ) | jq -e "(.dns.servers | length) == 2 and .dns.strategy == \"prefer_ipv4\""'
+assert_eval_true "B4 ip_version=6 => strategy ipv4_and_ipv6" '( ip_version=6 render_dns_object ) | jq -e ".dns.strategy == \"ipv4_and_ipv6\""'
+assert_eval_true "B4 dns_servers=off 整体关闭" '( dns_servers=off render_dns_object ) | jq -e "has(\"dns\") | not"'
+assert_eval_true "B4 dns_servers=none 整体关闭" '( dns_servers=none render_dns_object ) | jq -e "has(\"dns\") | not"'
 assert_eq "B4 非法 scheme 不渲染" "{}" "$(dns_servers='http://plain' render_dns_object)"
 assert_eq "B4 混入非法源整体不渲染" "{}" "$(dns_servers='https://1.1.1.1/dns-query,ftp://bad' render_dns_object)"
 
@@ -561,14 +641,37 @@ assert_eval_true "buffer 受内存上限约束" '( B=$(calculate_net_tune_buffer
 mkdir -p "${TEST_ROOT}/speedtest"
 cat >"${TEST_ROOT}/speedtest/speedtest" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "   Speedtest by Ookla 1.2.0"
-printf '%s\n' "Download:   812.34 Mbit/s"
-printf '%s\n' "Upload:   300.78 Mbit/s"
-printf '%s\n' "Latency:    12.34 ms"
+# v1.5.5：支持 -j/--output-type=json 的版本输出结构化 JSON，否则回退人类文本
+case " $* " in
+*" --output-type=json "*)
+  printf '%s\n' '{"type":"result","ping":{"jitter":1.5,"latency":12.34,"low":11,"high":13},"download":{"bandwidth":812340000,"bytes":101542500,"elapsed":1000},"upload":{"bandwidth":300780000,"bytes":37597500,"elapsed":1000}}'
+  ;;
+*)
+  printf '%s\n' "   Speedtest by Ookla 1.2.0"
+  printf '%s\n' "Download:   812.34 Mbit/s"
+  printf '%s\n' "Upload:   300.78 Mbit/s"
+  printf '%s\n' "Latency:    12.34 ms"
+  ;;
+esac
 EOF
-( cd "${TEST_ROOT}/speedtest"; chmod +x speedtest )
+cat >"${TEST_ROOT}/speedtest/speedtest-text" <<'EOF'
+#!/usr/bin/env bash
+# 老版本/无 JSON 输出：忽略 --output-type 参数，仅输出人类文本（验证文本回退解析）
+printf '%s\n' "   Speedtest by Ookla 1.1.0"
+printf '%s\n' "Download:   512.10 Mbit/s"
+printf '%s\n' "Upload:   200.50 Mbit/s"
+printf '%s\n' "Latency:    21.34 ms"
+EOF
+(
+  cd "${TEST_ROOT}/speedtest"
+  chmod +x speedtest speedtest-text
+)
+# 9.1：JSON 输出优先解析（bandwidth bit/s ÷ 1e6 = Mbps；latency ms 取整）
 assert_eq "Ookla 测速输出解析 Upload" "300" "$(run_speedtest "${TEST_ROOT}/speedtest/speedtest")"
 assert_eq "Ookla 测速输出解析 带宽+延迟" "300 12" "$(run_speedtest_metrics "${TEST_ROOT}/speedtest/speedtest")"
+# 9.1：无 JSON 输出的老版本走人类文本回退
+assert_eq "Ookla 无JSON 回退文本 Upload" "200" "$(run_speedtest "${TEST_ROOT}/speedtest/speedtest-text")"
+assert_eq "Ookla 无JSON 回退文本 带宽+延迟" "200 21" "$(run_speedtest_metrics "${TEST_ROOT}/speedtest/speedtest-text")"
 assert_eval_true "Ookla 官方 speedtest 识别" 'ls -la "${TEST_ROOT}/speedtest/speedtest" >/dev/null'
 
 # v1.2.3：net_tune 交互确认在非交互环境原样返回（保在线脚本可无人值守）
@@ -626,6 +729,10 @@ assert_eval_true "WS inbound 路径生效" 'jq -e ".inbounds[] | select(.transpo
 assert_eval_true "SOCKS5 inbound 用户生效" 'jq -e ".inbounds[] | select(.type == \"socks\" and .users[0].username == \"u1\")" "${CONFIG_FILE}" >/dev/null'
 assert_eval_true "vless 使用指定 uuid" 'jq -e ".inbounds[].users[]? | select(.uuid == \"11111111-2222-3333-4444-555555555555\")" "${CONFIG_FILE}" >/dev/null'
 assert_eq "config 日志级别默认 warn" "warn" "$(jq -r '.log.level' "${CONFIG_FILE}")"
+# 1.1/1.2/4.1：cache_file 连接缓存、clash_api 可观测面、route sniff 默认落盘
+assert_eval_true "cache_file 连接缓存默认开启" 'jq -e ".experimental.cache_file.enabled == true and (.experimental.cache_file.path | endswith(\"cache.db\"))" "${CONFIG_FILE}" >/dev/null'
+assert_eval_true "clash_api 可观测面默认开启(127.0.0.1)" 'jq -e ".experimental.clash_api.external_controller | startswith(\"127.0.0.1:\")" "${CONFIG_FILE}" >/dev/null'
+assert_eval_true "route sniff 默认开启" 'jq -e ".route.sniff.enabled == true and .route.sniff.override_destination == true" "${CONFIG_FILE}" >/dev/null'
 assert_eval_true "vless TFO 默认开" 'jq -e ".inbounds[] | select(.type == \"vless\" and .tcp_fast_open == true)" "${CONFIG_FILE}" >/dev/null'
 assert_eval_true "anytls TFO 默认开" 'jq -e ".inbounds[] | select(.type == \"anytls\" and .tcp_fast_open == true)" "${CONFIG_FILE}" >/dev/null'
 assert_eval_true "socks TFO 默认开" 'jq -e ".inbounds[] | select(.type == \"socks\" and .tcp_fast_open == true)" "${CONFIG_FILE}" >/dev/null'
@@ -682,11 +789,12 @@ cp "${CONFIG_FILE}" "${TEST_ROOT}/config.before"
 assert_eval_false "check 失败 render_config 拒写" '( SINGBOX_BIN="/bin/false"; render_config )'
 assert_eval_true "check 失败保留旧配置" 'cmp -s "${CONFIG_FILE}" "${TEST_ROOT}/config.before"'
 
-# B4：DNS 块开关 e2e（默认 config 无 dns；dns_servers 开启后渲染 dns 块；关闭后还原）
-assert_eval_true "默认 config 无 DNS 块" 'jq -e "has(\"dns\") | not" "${CONFIG_FILE}" >/dev/null'
-assert_eval_true "DNS 开关开启后渲染 dns 块" 'dns_servers="https://1.1.1.1/dns-query" render_config; jq -e "(.dns.servers | length) == 1 and .dns.independent_cache == true and .dns.strategy == \"ipv4_only\"" "${CONFIG_FILE}" >/dev/null'
+# B4/4.2：DNS 块 e2e（默认 config 含双源加密 DNS；显式 dns_servers 渲染；off 关闭后还原）
+assert_eval_true "默认 config 含双源加密 DNS 块" 'jq -e "(.dns.servers | length) == 2 and .dns.independent_cache == true" "${CONFIG_FILE}" >/dev/null'
+assert_eval_true "DNS 显式单源渲染 dns 块" 'dns_servers="https://1.1.1.1/dns-query" render_config; jq -e "(.dns.servers | length) == 1 and .dns.strategy == \"prefer_ipv4\"" "${CONFIG_FILE}" >/dev/null'
 dns_servers="" render_config
-assert_eval_true "关闭 DNS 后还原无 dns 块" 'jq -e "has(\"dns\") | not" "${CONFIG_FILE}" >/dev/null'
+assert_eval_true "DNS 关闭(off)后还原默认双源" 'dns_servers=off render_config; jq -e "has(\"dns\") | not" "${CONFIG_FILE}" >/dev/null'
+dns_servers="" render_config
 
 # sbm sub：base64 订阅输出（6 节点）
 assert_eval_true "sub 输出非空 base64" 'c="$(sub_command)"; [ "${#c}" -gt 100 ] && [[ "${c}" =~ ^[A-Za-z0-9+/=]+$ ]]'
@@ -729,7 +837,10 @@ source "${ROOT_DIR}/mtp.sh"
 
 assert_eval_true "generate_secret 输出 32 位 hex" 's="$(generate_secret)"; [[ "$s" =~ ^[0-9a-f]{32}$ ]]'
 assert_eval_true "random_domain 命中内置列表" 'd="$(random_domain)"; printf "%s\n" "${MTP_FAKE_DOMAINS[@]}" | grep -qx "$d"'
-assert_eq "valid_port 边界 65535" "0" "$(valid_port 65535; echo $?)"
+assert_eq "valid_port 边界 65535" "0" "$(
+  valid_port 65535
+  echo $?
+)"
 assert_eval_false "valid_port 0 非法" 'valid_port 0'
 assert_eval_false "valid_port 非数字非法" 'valid_port 12a'
 assert_eq "env_port 合法透传" "20086" "$(env_port 20086)"

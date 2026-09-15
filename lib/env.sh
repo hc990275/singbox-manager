@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# 运行期共享全局（LOCK_*/PUBLIC_IP_CACHE/HAS_PUBLIC_IPV4/CLOUDFLARED_LATEST_CACHE/NODE_META 等）
+# 由 lib/*.sh 各模块消费，跨文件引用 shellcheck 不可见，文件级豁免 SC2034。
+# shellcheck disable=SC2034
 set -eEuo pipefail
 
 umask 077
@@ -37,6 +40,9 @@ PUBLIC_IP_CACHE="${PUBLIC_IP_CACHE:-}"
 HAS_PUBLIC_IPV4=""
 CLOUDFLARED_LATEST_CACHE=""
 NODE_META=()
+# 9.2：证书指纹进程级缓存（key 为"证书路径|mtime"），须在 env.sh（源文件最外层）声明，
+# 否则会被 sbm_load_all 的函数作用域吞掉变为局部变量。
+declare -A CERT_FP_CACHE=()
 _METADATA_PORTS=""
 _SYSTEM_PORTS=""
 
@@ -137,4 +143,3 @@ handle_common_error() {
   release_lock
   exit "${exit_code}"
 }
-

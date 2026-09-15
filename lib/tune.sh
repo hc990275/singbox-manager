@@ -128,6 +128,73 @@ apply_sysctls() {
   fi
 }
 
+# 2.2/2.3/2.4/2.5：连接生命周期/并发/路径调优（默认值即最适，可整组由 net_tune=off 关闭）。
+# 与核心缓冲项同套容错语义：键不存在（精简内核）跳过，存在但写失败才报 warn。
+apply_sysctls_extra() {
+  local k v ok=true err=""
+  local -a pairs=(
+    net.core.rmem_default 262144
+    net.core.wmem_default 262144
+    net.core.netdev_max_backlog 5000
+    net.core.somaxconn 4096
+    net.ipv4.tcp_notsent_lowat 16384
+    net.ipv4.tcp_tw_reuse 1
+    net.ipv4.ip_local_port_range "10000 65535"
+    net.ipv4.tcp_max_syn_backlog 8192
+    net.ipv4.tcp_mtu_probing 1
+  )
+  local i
+  for ((i = 0; i < ${#pairs[@]}; i += 2)); do
+    k="${pairs[i]}"
+    v="${pairs[i + 1]}"
+    if ! sysctl -w "${k}=${v}" >/dev/null 2>&1; then
+      # 键不存在（精简内核）：无害，跳过；键存在但写入被拒：记失败
+      if [ -n "$(sysctl -n "${k}" 2>/dev/null)" ]; then
+        ok=false
+        err="${err}${k} "
+      fi
+    fi
+  done
+
+  # 2.5：conntrack 上限仅在该子系统可用（存在且可写）时按内存档位抬升，防 NAT 表满丢新连接。
+  local ct_max
+  if [ -w /proc/sys/net/netfilter/nf_conntrack_max ]; then
+    case "$(get_tcp_buffer_cap_mb)" in
+    16) ct_max=131072 ;;
+    32) ct_max=196608 ;;
+    *) ct_max=262144 ;;
+    esac
+    if ! sysctl -w "net.netfilter.nf_conntrack_max=${ct_max}" >/dev/null 2>&1; then
+      ok=false
+      err="${err}nf_conntrack_max "
+    fi
+  fi
+
+  if [ -d /etc/sysctl.d ] && [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+    {
+      echo "# singbox-manager net_tune：连接生命周期/并发/路径（v1.4.0+，重启后自动加载）"
+      echo "net.core.rmem_default=262144"
+      echo "net.core.wmem_default=262144"
+      echo "net.core.netdev_max_backlog=5000"
+      echo "net.core.somaxconn=4096"
+      echo "net.ipv4.tcp_notsent_lowat=16384"
+      echo "net.ipv4.tcp_tw_reuse=1"
+      echo "net.ipv4.ip_local_port_range=10000 65535"
+      echo "net.ipv4.tcp_max_syn_backlog=8192"
+      echo "net.ipv4.tcp_mtu_probing=1"
+      if [ -n "${ct_max:-}" ]; then
+        echo "net.netfilter.nf_conntrack_max=${ct_max}"
+      fi
+    } >"/etc/sysctl.d/98-singbox-manager-net-tune-extra.conf" 2>/dev/null
+  fi
+
+  if [ "${ok}" = "true" ]; then
+    print_ok "已应用连接调优：背压/监听队列/端口区/发送低水位/MTU 探测${ct_max:+（conntrack=${ct_max}）}，并已持久化。"
+  else
+    print_warn "连接调优部分项写入失败（${err}），已跳过受限项。"
+  fi
+}
+
 apply_network_tune() {
   net_tune_requested || return 0
   [ "$(id -u 2>/dev/null || echo 1)" = "0" ] || return 0
@@ -197,5 +264,5 @@ apply_network_tune() {
 
   buffer_bytes=$((buffer_mb * 1024 * 1024))
   apply_sysctls "${buffer_bytes}"
+  apply_sysctls_extra
 }
-

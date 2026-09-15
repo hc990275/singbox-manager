@@ -39,7 +39,12 @@ build_share_link() {
   case "$protocol" in
   vless-reality)
     # 批量 url_encode：4 个字段一次 jq 子进程（原逐字段 url_encode 每字段一个 jq fork）
-    { read -r reality_server; read -r public_key; read -r short_id; read -r name; } <<EOF
+    {
+      read -r reality_server
+      read -r public_key
+      read -r short_id
+      read -r name
+    } <<EOF
 $(url_encode_many "${reality_server}" "${public_key}" "${short_id}" "${name}")
 EOF
     printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s' \
@@ -56,7 +61,11 @@ EOF
       fi
       cdn_sni="${cdn_sni:-${preferred_domain}}"
       # 批量编码 cdn_sni×2 + ws_path（一次 jq 子进程）
-      { read -r cdn_sni_enc; read -r cdn_sni_enc2; read -r ws_path_enc; } <<EOF
+      {
+        read -r cdn_sni_enc
+        read -r cdn_sni_enc2
+        read -r ws_path_enc
+      } <<EOF
 $(url_encode_many "${cdn_sni}" "${cdn_sni}" "${ws_path}")
 EOF
       printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s' \
@@ -65,7 +74,11 @@ EOF
     else
       # 直连模式：客户端连服务器 IP + wspt，SNI/Host 均走 WS Host 域名（自签证书跳过校验）
       # 批量编码 host_domain×2（sni+host）+ ws_path（一次 jq 子进程）
-      { read -r sni_enc; read -r host_enc; read -r ws_path_enc; } <<EOF
+      {
+        read -r sni_enc
+        read -r host_enc
+        read -r ws_path_enc
+      } <<EOF
 $(url_encode_many "${host_domain}" "${host_domain}" "${ws_path}")
 EOF
       printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s' \
@@ -88,7 +101,10 @@ EOF
     ;;
   anytls)
     # 批量编码 password + name（一次 jq 子进程，原逐字段 2 fork）
-    { read -r password_enc; read -r name_enc; } <<EOF
+    {
+      read -r password_enc
+      read -r name_enc
+    } <<EOF
 $(url_encode_many "${password}" "${name}")
 EOF
     tls_server="$(url_encode "${tls_server}")"
@@ -146,4 +162,3 @@ EOF
 build_vless_argo_link() {
   build_share_link "$1"
 }
-

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SCRIPT_VERSION 由 scripts/check-version.sh 外部读取做版本一致性门禁，豁免 SC2034。
+# shellcheck disable=SC2034
 set -eEuo pipefail
 
 ###############################################################################
@@ -17,7 +19,7 @@ set -eEuo pipefail
 #   mtp_ip_mode   监听模式 v4 / v6 / dual（可选，默认 v4）
 ###############################################################################
 
-SCRIPT_VERSION="1.5.4"
+SCRIPT_VERSION="1.5.5"
 
 # MTG GO 版本与校验：上游 jyucoeng/singbox-tools 的 Go 构建镜像
 MTP_WORKDIR="/opt/mtproxy"
@@ -55,22 +57,30 @@ supports_color() {
   return 0
 }
 
-GREEN=""; RED=""; YELLOW=""; BLUE=""; PLAIN=""
+GREEN=""
+RED=""
+YELLOW=""
+BLUE=""
+PLAIN=""
 if supports_color; then
-  GREEN=$'\033[32m'; RED=$'\033[31m'; YELLOW=$'\033[33m'; BLUE=$'\033[34m'; PLAIN=$'\033[0m'
+  GREEN=$'\033[32m'
+  RED=$'\033[31m'
+  YELLOW=$'\033[33m'
+  BLUE=$'\033[34m'
+  PLAIN=$'\033[0m'
 fi
 
-mtp_print_ok()   { echo -e "${GREEN}[OK] $*${PLAIN}"; }
+mtp_print_ok() { echo -e "${GREEN}[OK] $*${PLAIN}"; }
 mtp_print_info() { echo -e "${BLUE}[INFO] $*${PLAIN}"; }
 mtp_print_warn() { echo -e "${YELLOW}[WARN] $*${PLAIN}"; }
-mtp_print_err()  { echo -e "${RED}[ERROR] $*${PLAIN}" >&2; }
+mtp_print_err() { echo -e "${RED}[ERROR] $*${PLAIN}" >&2; }
 
 mtp_fatal() {
   mtp_print_err "$*"
   exit 1
 }
 
-is_num() { case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
+is_num() { case "$1" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac }
 
 valid_port() {
   local p="$1"
@@ -141,7 +151,7 @@ generate_secret() {
 random_domain() {
   # 用 date 纳秒对内置列表长度取模，纯 bash 无竞态
   local idx
-  idx=$(( $(date +%s%N) % ${#MTP_FAKE_DOMAINS[@]} ))
+  idx=$(($(date +%s%N) % ${#MTP_FAKE_DOMAINS[@]}))
   printf '%s' "${MTP_FAKE_DOMAINS[$idx]}"
 }
 
@@ -244,7 +254,7 @@ mtp_create_service() {
   cmd_line="${MTP_BIN_DIR}/mtg-go $(mtp_run_args "${port}" "${full_secret}" "${ip_mode}")"
 
   mkdir -p "${MTP_WORKDIR}"
-  cat > "${MTP_CONF}" <<EOF
+  cat >"${MTP_CONF}" <<EOF
 PORT=${port}
 SECRET=${full_secret}
 DOMAIN=${domain}
@@ -253,7 +263,7 @@ EOF
   chmod 0600 "${MTP_CONF}"
 
   if [ "${INIT_SYSTEM}" = "systemd" ]; then
-    cat > "/etc/systemd/system/${MTP_SERVICE}.service" <<EOF
+    cat >"/etc/systemd/system/${MTP_SERVICE}.service" <<EOF
 [Unit]
 Description=MTProto Proxy (Go - mtg)
 After=network.target
@@ -274,7 +284,7 @@ EOF
     systemctl enable "${MTP_SERVICE}" >/dev/null 2>&1 || true
     systemctl restart "${MTP_SERVICE}"
   elif [ "${INIT_SYSTEM}" = "openrc" ]; then
-    cat > "/etc/init.d/${MTP_SERVICE}" <<EOF
+    cat >"/etc/init.d/${MTP_SERVICE}" <<EOF
 #!/sbin/openrc-run
 name="${MTP_SERVICE}"
 description="MTProto Proxy (Go)"
@@ -294,7 +304,7 @@ EOF
   else
     # 无服务管理器：后台运行并写 pidfile（尽力而为）
     nohup sh -c "${cmd_line} >>${MTP_LOG} 2>&1" >/dev/null 2>&1 &
-    echo $! > "${MTP_WORKDIR}/mtp.pid"
+    echo $! >"${MTP_WORKDIR}/mtp.pid"
     mtp_print_warn "未检测到 systemd/openrc，已用 nohup 后台运行（pid: $(cat "${MTP_WORKDIR}/mtp.pid")）。"
   fi
 }
@@ -385,7 +395,10 @@ mtp_install() {
 
   case "${mtp_ip_mode:-v4}" in
   v4 | v6 | dual) ip_mode="${mtp_ip_mode:-v4}" ;;
-  *) mtp_print_err "mtp_ip_mode 仅支持 v4 / v6 / dual。"; return 1 ;;
+  *)
+    mtp_print_err "mtp_ip_mode 仅支持 v4 / v6 / dual。"
+    return 1
+    ;;
   esac
 
   if [ -f "${MTP_CONF}" ]; then
@@ -424,7 +437,7 @@ mtp_restart() {
       kill "$(cat "${MTP_WORKDIR}/mtp.pid")" >/dev/null 2>&1 || true
     fi
     nohup sh -c "${MTP_BIN_DIR}/mtg-go $(mtp_run_args) >>${MTP_LOG} 2>&1" >/dev/null 2>&1 &
-    echo $! > "${MTP_WORKDIR}/mtp.pid"
+    echo $! >"${MTP_WORKDIR}/mtp.pid"
     mtp_print_ok "已重启 ${MTP_SERVICE}（pid: $(cat "${MTP_WORKDIR}/mtp.pid")）。"
     ;;
   esac

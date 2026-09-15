@@ -39,4 +39,3 @@ set_setting() {
   # shellcheck disable=SC2016
   json_update "${SETTING_FILE}" --arg key "$key" --arg value "$value" '.[$key] = $value'
 }
-

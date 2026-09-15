@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SOURCE_ROOT 由 sbm_load_all 的 sbm_module_path 消费（跨文件引用），豁免 SC2034。
+# shellcheck disable=SC2034
 set -eEuo pipefail
 
 umask 077
@@ -71,6 +73,35 @@ ensure_log_rotation() {
     [ -n "${lf}" ] || continue
     rotate_log_file "${lf}" || true
   done < <(find "${LOG_DIR}" -type f -name '*.cloudflared.log' 2>/dev/null)
+  # 1.1：cache.db 连接缓存超阈值直接清空（开心保活防膨胀；重建代价低）
+  local cache_file cache_size
+  cache_file="${RUNTIME_DIR}/cache.db"
+  if [ -f "${cache_file}" ]; then
+    cache_size="$(wc -c <"${cache_file}" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "${cache_size}" ] && [ "${cache_size}" -gt $((LOG_ROTATE_SIZE_MB * 1024 * 1024)) ]; then
+      rm -f "${cache_file}"
+      print_warn "cache.db 超过 ${LOG_ROTATE_SIZE_MB}MB，已清空重建。"
+    fi
+  fi
+}
+
+# 5.2：数据面健康判定——TCP 任一可探活即健康；全 UDP / 混合部署在进程存活前提下
+# 额外旁路 UDP(QUIC) 端口绑定探测（TCP 探活对 hy2/tuic 无意义）：
+#   UDP 节点存在且全部未绑定 → 假活；status=2(全 UDP) 且绑定正常 → 健康。
+singbox_healthy() {
+  local status udp_cnt
+  singbox_probe_status
+  status=$?
+  [ "${status}" = 0 ] && return 0
+  udp_cnt="$(udp_node_count)"
+  if [ "${udp_cnt}" -gt 0 ]; then
+    if any_udp_port_bound; then
+      return 0
+    fi
+    return 1
+  fi
+  [ "${status}" = 2 ] && return 0
+  return 1
 }
 
 # P2：数据面探活失败计数与升级——按 SBM_PROBE_FAIL_LIMIT（默认 3）
@@ -94,6 +125,8 @@ probe_fail_escalate() {
   fi
   rm -f "${probe_fail_file}"
   print_warn "sing-box 连续 ${probe_fail} 次数据面探活失败，判定假死，强制重启。"
+  # 1.2：重启前 dump 当前活动连接快照到运行时日志，辅助根因定位
+  clash_api_dump_connections || true
   eval "${restart_cmd}"
 }
 
@@ -103,15 +136,13 @@ ensure_singbox() {
   fi
 
   local pid
-  local status
 
   if systemd_available; then
     if ! systemctl is-active --quiet "${SERVICE_NAME}"; then
       systemctl restart "${SERVICE_NAME}" >/dev/null 2>&1 || true
       return 0
     fi
-    singbox_probe_status; status=$?
-    if [ "${status}" = 0 ] || [ "${status}" = 2 ]; then
+    if singbox_healthy; then
       rm -f "${RUNTIME_DIR}/probe_fail_count"
       return 0
     fi
@@ -121,8 +152,7 @@ ensure_singbox() {
 
   if openrc_available; then
     if rc-service "${SERVICE_NAME}" status >/dev/null 2>&1; then
-      singbox_probe_status; status=$?
-      if [ "${status}" = 0 ] || [ "${status}" = 2 ]; then
+      if singbox_healthy; then
         rm -f "${RUNTIME_DIR}/probe_fail_count"
         return 0
       fi
@@ -137,10 +167,9 @@ ensure_singbox() {
   pid="$(read_pid_file "${PID_FILE}" 2>/dev/null || true)"
   # 存活且（/proc 可用时）确为 sing-box 实例才认为健康，防止 PID 复用导致漏重启
   if [ -n "${pid}" ] && pid_matches_binary_or_alive "${pid}" "${SINGBOX_BIN}"; then
-    # S1：进程存活但所有 TCP 类节点端口均不可探测（数据面无响应）时视为假死，
-    #     按失败计数升级重启；全 UDP 部署（status=2）以进程存活为准视为健康。
-    singbox_probe_status; status=$?
-    if [ "${status}" = 0 ] || [ "${status}" = 2 ]; then
+    # S1：进程存活但数据传输面无响应时视为假死候选，按失败计数升级重启；
+    # 全 UDP 部署由 singbox_healthy 的端口绑定旁路判定。
+    if singbox_healthy; then
       rm -f "${RUNTIME_DIR}/probe_fail_count"
       return 0
     fi
@@ -154,7 +183,7 @@ ensure_singbox() {
 
 start_temp_tunnel() {
   local tag="$1"
-  local local_port pid_file log_file domain edge_ip
+  local local_port pid_file log_file domain edge_ip tmp_pid
   local_port="$(node_value "$tag" "port")"
   pid_file="${RUNTIME_DIR}/${tag}.pid"
   log_file="${LOG_DIR}/${tag}.cloudflared.log"
@@ -177,10 +206,12 @@ start_temp_tunnel() {
   # --protocol http2：压掉 QUIC 内存尖峰；追加模式写入（O_APPEND）避免轮转后稀疏文件
   nohup "${CLOUDFLARED_BIN}" tunnel --no-autoupdate --protocol http2 --edge-ip-version "${edge_ip}" --url "http://127.0.0.1:${local_port}" \
     >>"${log_file}" 2>&1 &
-  write_pid_file "${pid_file}" "$!"
+  tmp_pid=$!
+  write_pid_file "${pid_file}" "${tmp_pid}"
 
-  # 域名需通过公共 DNS 发布确认（DoH）才写入节点，防止"看似成功实则不可解析"
-  if domain="$(wait_for_trycloudflare_domain_verified "${log_file}" 60 1)"; then
+  # 域名需通过公共 DNS 发布确认（DoH）才写入节点，防止"看似成功实则不可解析"；
+  # 传入 pid：进程假死/提前退出时快速失败，不等满 60s 超时
+  if domain="$(wait_for_trycloudflare_domain_verified "${log_file}" 60 1 "${tmp_pid}")"; then
     try_acquire_lock || {
       kill_pid_file "${pid_file}" "${CLOUDFLARED_BIN}"
       print_warn "写入 ${tag} 的临时 Argo 域名时无法获取锁，已保留隧道待下轮确认。"
@@ -233,17 +264,24 @@ ensure_argo_nodes() {
   [ -f "${NODES_FILE}" ] || return 0
   [ -x "${CLOUDFLARED_BIN}" ] || return 0
 
-  while IFS= read -r tag; do
+  # 9.3：jq 批量化——一次 bulk 拿到全部 (tag, protocol, argo_mode)，替代逐 tag node_value
+  while IFS=$'\t' read -r tag protocol mode; do
     [ -n "${tag}" ] || continue
-    protocol="$(node_value "$tag" "protocol")"
     [ "${protocol}" = "vless-argo" ] || continue
 
     pid_file="${RUNTIME_DIR}/${tag}.pid"
     pid="$(read_pid_file "${pid_file}" 2>/dev/null || true)"
     # 存活且（/proc 可用时）确为 cloudflared 实例才跳过重启，防止 PID 复用漏拉起
     if [ -n "${pid}" ] && pid_matches_binary_or_alive "${pid}" "${CLOUDFLARED_BIN}"; then
-      # 隧道长时间稳定运行：清零崩溃计数，避免旧失败影响后续退避
-      reset_restart_count "${tag}"
+      # 5.4：token 固定隧道做健康探活（endpoint_domain:443）；临时隧道不探（域名属云端分配）
+      if [ "${mode}" = "token" ]; then
+        if probe_token_tunnel "${tag}"; then
+          reset_restart_count "${tag}"
+        fi
+      else
+        # 隧道长时间稳定运行：清零崩溃计数，避免旧失败影响后续退避
+        reset_restart_count "${tag}"
+      fi
       continue
     fi
 
@@ -264,7 +302,6 @@ ensure_argo_nodes() {
     fi
 
     rm -f "${pid_file}"
-    mode="$(node_value "$tag" "argo_mode")"
     if [ "${mode}" = "token" ]; then
       if start_token_tunnel "${tag}"; then
         bump_restart_count "${tag}"
@@ -279,7 +316,48 @@ ensure_argo_nodes() {
       fi
       try_acquire_lock || true
     fi
-  done < <(iter_node_tags)
+  done < <(node_meta_bulk)
+}
+
+# 5.4：token 固定隧道的健康探活——endpoint_domain:443 连不上且连续
+# SBM_TUNNEL_PROBE_LIMIT（默认 2）轮失败即 kill 进程，交由退避重启路径拉起。
+probe_token_tunnel() {
+  local tag="$1"
+  local domain fail_file fails
+  domain="$(node_value "$tag" "endpoint_domain")"
+  [ -n "${domain}" ] || return 0
+  if probe_tcp_port "${domain}" 443 3; then
+    rm -f "${RUNTIME_DIR}/${tag}.tunnel_probe_fail"
+    return 0
+  fi
+  fail_file="${RUNTIME_DIR}/${tag}.tunnel_probe_fail"
+  fails="$(tr -dc '0-9' <"${fail_file}" 2>/dev/null || true)"
+  fails="${fails:-0}"
+  fails=$((fails + 1))
+  printf '%s' "${fails}" >"${fail_file}"
+  chmod 600 "${fail_file}" 2>/dev/null || true
+  if [ "${fails}" -ge "${SBM_TUNNEL_PROBE_LIMIT:-2}" ]; then
+    print_warn "token 隧道 ${tag} 连续 ${fails} 轮探活失败（${domain}:443 不可达），判定假活，准备退避重启。"
+    rm -f "${fail_file}"
+    kill_pid_file "${RUNTIME_DIR}/${tag}.pid" "${CLOUDFLARED_BIN}"
+    return 1
+  fi
+  print_warn "token 隧道 ${tag} 第 ${fails}/${SBM_TUNNEL_PROBE_LIMIT:-2} 轮探活失败（${domain}:443 不可达）。"
+  return 0
+}
+
+# 5.5：minimal metrics——每轮 watchdog 追加一行 jsonl（探活三态，秒级时间戳），
+# 供运维排障回溯探活失败窗口；超过 5MB 裁为 backups 仅留最近一份。
+write_metrics_line() {
+  local ts probe sz
+  ts="$(date +%s 2>/dev/null || printf 0)"
+  singbox_probe_status
+  probe=$?
+  printf '{"ts":%s,"probe":%s}\n' "${ts}" "${probe}" >>"${RUNTIME_DIR}/metrics.jsonl" 2>/dev/null || true
+  sz="$(wc -c <"${RUNTIME_DIR}/metrics.jsonl" 2>/dev/null | tr -d '[:space:]' || printf 0)"
+  if [ -n "${sz}" ] && [ "${sz}" -gt 5242880 ]; then
+    mv "${RUNTIME_DIR}/metrics.jsonl" "${RUNTIME_DIR}/metrics.jsonl.1" 2>/dev/null || true
+  fi
 }
 
 require_root
@@ -294,5 +372,6 @@ ensure_log_rotation
 reconcile_state || true
 ensure_singbox
 ensure_argo_nodes
+write_metrics_line
 sanitize_permissions
 release_lock

@@ -92,4 +92,3 @@ generate_tag() {
   local prefix="$1"
   printf '%s-%s-%s' "$prefix" "$(date +%s)" "$(generate_hex 4)"
 }
-

@@ -372,4 +372,3 @@ uninstall_project() {
   print_ok "项目已卸载。"
   return 0
 }
-

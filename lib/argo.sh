@@ -12,10 +12,16 @@ wait_for_trycloudflare_domain() {
   local log_file="$1"
   local timeout="${2:-60}"
   local interval="${3:-2}"
+  # 3.2:可传 cloudflared pid：进程假死/提前退出时立即失败，不等满 timeout（快速失败）
+  local pid="${4:-}"
   local elapsed=0
   local domain=""
 
   while [ "${elapsed}" -lt "${timeout}" ]; do
+    if [ -n "${pid}" ] && ! kill -0 "${pid}" 2>/dev/null; then
+      print_warn "cloudflared 进程（pid ${pid}）已退出，停止等待临时域名。"
+      return 1
+    fi
     domain="$(parse_trycloudflare_domain "$log_file" || true)"
     if [ -n "$domain" ]; then
       printf '%s' "$domain"
@@ -105,11 +111,12 @@ wait_for_trycloudflare_domain_verified() {
   local log_file="$1"
   local timeout="${2:-60}"
   local retry="${3:-1}"
+  local pid="${4:-}"
   local domain attempt
 
   for attempt in 0 1 2; do
     [ "${attempt}" -le "${retry}" ] || break
-    domain="$(wait_for_trycloudflare_domain "${log_file}" "${timeout}" 2 || true)"
+    domain="$(wait_for_trycloudflare_domain "${log_file}" "${timeout}" 2 "${pid}" || true)"
     [ -n "${domain}" ] || continue
     if argo_domain_resolvable "${domain}"; then
       printf '%s' "${domain}"
@@ -133,11 +140,50 @@ argo_backoff_delay() {
 }
 
 argo_edge_ip_version() {
-  if has_public_ipv4; then
-    printf '4'
-  else
-    printf '6'
+  local has4 has6
+  # 边缘 IP 族选择：双栈环境交给 cloudflared --edge-ip-version auto（3.2）；
+  # 单栈环境先探测 Cloudflare 同族边缘可达性，不可达则翻转族（规避运营商回程差异）。
+  has4=false
+  has6=false
+  has_public_ipv4 && has4=true
+  has_public_ipv6 && has6=true
+
+  if [ "${has4}" = "true" ] && [ "${has6}" = "true" ]; then
+    printf 'auto'
+    return 0
   fi
+  if [ "${has4}" = "true" ]; then
+    if probe_edge_family "4"; then
+      printf '4'
+    else
+      print_warn "IPv4 边缘（region1.v2.argotunnel.com）不可达，回退 IPv6 边缘。"
+      printf '6'
+    fi
+    return 0
+  fi
+  if [ "${has6}" = "true" ]; then
+    if probe_edge_family "6"; then
+      printf '6'
+    else
+      print_warn "IPv6 边缘（region1.v2.argotunnel.com）不可达，回退 IPv4 边缘。"
+      printf '4'
+    fi
+    return 0
+  fi
+  printf 'auto'
+}
+
+# 3.2：探测 Cloudflare 边缘注册服务（region1.v2.argotunnel.com:443）在指定 IP 族的可达性。
+probe_edge_family() {
+  local fam="$1"
+  command_exists curl || return 0
+  local flag
+  if [ "${fam}" = "6" ]; then
+    flag="--ipv6"
+  else
+    flag="--ipv4"
+  fi
+  curl -fsS --max-time 3 "${flag}" "https://region1.v2.argotunnel.com" >/dev/null 2>&1
 }
 
 cloudflared_latest_release_json() {
@@ -210,7 +256,6 @@ cloudflared_installed_version() {
   printf '%s' "${out#cloudflared version }"
 }
 
-
 cleanup_argo_pid() {
   local pid_file="$1"
   kill_pid_file "$pid_file"
@@ -256,10 +301,12 @@ start_argo_node() {
 
   nohup "${CLOUDFLARED_BIN}" tunnel --no-autoupdate --protocol http2 --edge-ip-version "${edge_ip}" --url "http://127.0.0.1:${port}" \
     >>"${log_file}" 2>&1 &
-  write_pid_file "${pid_file}" "$!"
+  local _pid=$!
+  write_pid_file "${pid_file}" "${_pid}"
 
-  # 等待域名出现且确认公共 DNS 已发布（DoH 核验，防"看似成功实则不可解析"）
-  if domain="$(wait_for_trycloudflare_domain_verified "${log_file}" 60 1)"; then
+  # 等待域名出现且确认公共 DNS 已发布（DoH 核验，防"看似成功实则不可解析"）；
+  # 传入 pid：进程假死/提前退出时快速失败，不等满 60s 超时
+  if domain="$(wait_for_trycloudflare_domain_verified "${log_file}" 60 1 "${_pid}")"; then
     if ! json_set_field "${NODES_FILE}" "${tag}" "endpoint_domain" "${domain}"; then
       cleanup_argo_pid "${pid_file}"
       return 1
@@ -273,13 +320,13 @@ start_argo_node() {
 }
 
 restart_all_argo_nodes() {
-  local tag
-  while IFS= read -r tag; do
+  # 9.3:jq 批量化——一次 bulk 拿到全部 (tag, protocol)，替代逐 tag node_value
+  local tag protocol
+  while IFS=$'\t' read -r tag protocol; do
     [ -n "${tag}" ] || continue
-    if [ "$(node_value "$tag" "protocol")" = "vless-argo" ]; then
+    if [ "${protocol}" = "vless-argo" ]; then
       # 单个隧道启动失败不影响其余隧道与调用方
       start_argo_node "$tag" || print_warn "Argo 隧道 ${tag} 启动失败。"
     fi
-  done < <(iter_node_tags)
+  done < <(node_meta_bulk)
 }
-

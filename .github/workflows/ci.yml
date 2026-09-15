@@ -20,17 +20,17 @@ jobs:
           sudo install -m 0755 /tmp/shfmt /usr/local/bin/shfmt
 
       - name: ShellCheck
-        run: shellcheck -e SC1091 install.sh sb.sh lib/common.sh scripts/watchdog.sh scripts/build-release-bundle.sh scripts/check-version.sh tests/smoke.sh
+        run: shellcheck -e SC1091 install.sh sb.sh mtp.sh lib/*.sh scripts/watchdog.sh scripts/build-release-bundle.sh scripts/check-version.sh tests/smoke.sh
 
       - name: Bash Syntax
-        run: bash -n install.sh sb.sh lib/common.sh scripts/watchdog.sh scripts/build-release-bundle.sh scripts/check-version.sh tests/smoke.sh
+        run: bash -n install.sh sb.sh mtp.sh lib/*.sh scripts/watchdog.sh scripts/build-release-bundle.sh scripts/check-version.sh tests/smoke.sh
 
       - name: Formatting
-        run: shfmt -i 2 -d install.sh sb.sh lib/common.sh scripts/watchdog.sh scripts/build-release-bundle.sh scripts/check-version.sh
+        run: shfmt -i 2 -d install.sh sb.sh mtp.sh lib/*.sh scripts/watchdog.sh scripts/build-release-bundle.sh scripts/check-version.sh tests/smoke.sh
 
       - name: No CRLF
         run: |
-          if grep -rlP '\r' install.sh sb.sh lib metadata scripts tests README.md .github 2>/dev/null; then
+          if grep -rlP '\r' install.sh sb.sh mtp.sh lib metadata scripts tests README.md .github 2>/dev/null; then
             echo "Found CRLF line endings in shell scripts"; exit 1
           fi
 

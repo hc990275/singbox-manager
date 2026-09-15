@@ -3,12 +3,65 @@ set -eEuo pipefail
 
 umask 077
 
+# 9.2：CERT_FP_CACHE 声明于 env.sh（见注释；此处勿再 declare，避免函数作用域遮蔽）。
+# 9.4：自签证书优先 ECDSA P-256（握手计算量小、公钥短，移动端低能耗），
+# 旧 OpenSSL 不支持 EC 时的回退 RSA-2048；两者均先试 -addext，不支持时回退 -extfile。
+_generate_self_signed() {
+  local key_file="$1" cert_file="$2" domain="$3"
+  local saf extfile alg
+  if [[ "$domain" =~ ^[0-9a-fA-F:.]+$ ]]; then
+    saf="subjectAltName=IP:${domain}"
+  else
+    saf="subjectAltName=DNS:${domain}"
+  fi
+
+  local -a algs=()
+  if openssl ecparam -name prime256v1 -check >/dev/null 2>&1; then
+    algs+=(ecdsa)
+  fi
+  algs+=(rsa)
+
+  for alg in "${algs[@]}"; do
+    if [ "${alg}" = "ecdsa" ]; then
+      if openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 36135 \
+        -keyout "${key_file}" -out "${cert_file}" -subj "/CN=${domain}" \
+        -addext "${saf}" >/dev/null 2>&1; then
+        return 0
+      fi
+      extfile="$(mktemp "${CERT_DIR}/.ext.XXXXXX")"
+      printf '%s\n' "${saf}" >"${extfile}"
+      if openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 36135 \
+        -keyout "${key_file}" -out "${cert_file}" -subj "/CN=${domain}" \
+        -extfile "${extfile}" >/dev/null 2>&1; then
+        rm -f "${extfile}"
+        return 0
+      fi
+      rm -f "${extfile}"
+    else
+      if openssl req -x509 -newkey rsa:2048 -nodes -days 36135 \
+        -keyout "${key_file}" -out "${cert_file}" -subj "/CN=${domain}" \
+        -addext "${saf}" >/dev/null 2>&1; then
+        return 0
+      fi
+      extfile="$(mktemp "${CERT_DIR}/.ext.XXXXXX")"
+      printf '%s\n' "${saf}" >"${extfile}"
+      if openssl req -x509 -newkey rsa:2048 -nodes -days 36135 \
+        -keyout "${key_file}" -out "${cert_file}" -subj "/CN=${domain}" \
+        -extfile "${extfile}" >/dev/null 2>&1; then
+        rm -f "${extfile}"
+        return 0
+      fi
+      rm -f "${extfile}"
+    fi
+  done
+  return 1
+}
+
 ensure_tls_material() {
   local tag="$1"
   local domain="$2"
   local cert_file="${CERT_DIR}/${tag}.crt"
   local key_file="${CERT_DIR}/${tag}.key"
-  local san
 
   if [ -f "$cert_file" ] && [ -f "$key_file" ]; then
     chmod 600 "$cert_file" "$key_file"
@@ -16,33 +69,12 @@ ensure_tls_material() {
     return 0
   fi
 
-  if [[ "$domain" =~ ^[0-9a-fA-F:.]+$ ]]; then
-    san="IP:${domain}"
-  else
-    san="DNS:${domain}"
-  fi
-
   # 自签证书有效期 99 年（99×365=36135 天），配合证书指纹固定（pcs），
   # 避免客户端的证书过期告警与频繁重建。
-  local extfile=""
-  if ! openssl req -x509 -newkey rsa:2048 -nodes -days 36135 \
-    -keyout "$key_file" \
-    -out "$cert_file" \
-    -subj "/CN=${domain}" \
-    -addext "subjectAltName=${san}" >/dev/null 2>&1; then
-    # -addext 不受支持时改用 -extfile（OpenSSL 1.0+ 均可用），仍保留 SAN
-    extfile="$(mktemp "${CERT_DIR}/.ext.XXXXXX")"
-    printf 'subjectAltName=%s\n' "${san}" >"${extfile}"
-    if ! openssl req -x509 -newkey rsa:2048 -nodes -days 36135 \
-      -keyout "$key_file" \
-      -out "$cert_file" \
-      -subj "/CN=${domain}" \
-      -extfile "${extfile}" >/dev/null 2>&1; then
-      rm -f "${extfile}"
-      print_err "自签证书生成失败（含 SAN）：${domain}"
-      return 1
-    fi
-    rm -f "${extfile}"
+  if ! _generate_self_signed "$key_file" "$cert_file" "$domain"; then
+    rm -f "${cert_file}" "${key_file}"
+    print_err "自签证书生成失败（含 SAN）：${domain}"
+    return 1
   fi
 
   chmod 600 "$cert_file" "$key_file"
@@ -52,9 +84,20 @@ ensure_tls_material() {
 cert_fingerprint() {
   local cert_file="$1"
   [ -f "${cert_file}" ] || return 1
-  openssl x509 -in "${cert_file}" -outform DER 2>/dev/null | openssl dgst -sha256 -r 2>/dev/null | awk '{print $1}'
+  # 9.2：mtime 指纹缓存——同证书重复计算（ldc/分享链接）只做一次 openssl
+  local mtime cached key
+  mtime="$(stat -c %Y "${cert_file}" 2>/dev/null || true)"
+  [ -n "${mtime}" ] || mtime=""
+  key="${cert_file}|${mtime}"
+  if [[ -v "CERT_FP_CACHE[$key]" ]]; then
+    printf '%s' "${CERT_FP_CACHE["$key"]}"
+    return 0
+  fi
+  cached="$(openssl x509 -in "${cert_file}" -outform DER 2>/dev/null | openssl dgst -sha256 -r 2>/dev/null | awk '{print $1}')"
+  [ -n "${cached}" ] || return 1
+  CERT_FP_CACHE["${key}"]="${cached}"
+  printf '%s' "${cached}"
 }
-
 
 managed_cert_path() {
   local tag="$1"
@@ -102,7 +145,10 @@ import_custom_certificate_content() {
     return 1
   fi
   printf '%s' "$cert_b64" | base64 -d >"$cert_file" || return 1
-  printf '%s' "$key_b64" | base64 -d >"$key_file" || { rm -f "$cert_file"; return 1; }
+  printf '%s' "$key_b64" | base64 -d >"$key_file" || {
+    rm -f "$cert_file"
+    return 1
+  }
   chmod 600 "$cert_file" "$key_file"
   printf '%s|%s' "$cert_file" "$key_file"
 }
@@ -203,4 +249,3 @@ cleanup_orphan_certs() {
     fi
   done < <(find "${CERT_DIR}" -type f \( -name '*.crt' -o -name '*.key' \) 2>/dev/null)
 }
-

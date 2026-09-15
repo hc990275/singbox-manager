@@ -22,22 +22,28 @@ save_node_bundle() {
   invalidate_port_caches
 }
 
-# B4：DNS 块默认关闭（dns_servers 为空=不渲染=现行为）；开启时走加密 DNS +
-  # independent_cache，降低目标域名解析延迟并抗污染。逗号分隔多源；格式非法不渲染（输出 {}）。
+# B4/4.2：DNS 块默认开启（空 dns_servers 走一组加密 DNS，降低解析延迟并抗污染）；
+#   dns_servers=off|none 可整体关闭；非法格式不渲染（输出 {}）。逗号分隔多源。
+#   strategy 跟随全局 ip_version（auto→prefer_ipv4，6→ipv4_and_ipv6）。
+#   局部名用 __ 前缀：dns_servers 是环境变量键名，同名局部变量会在
+#   env_var 的间接引用（${!key}）中命中空值（bash 动态作用域）
 render_dns_object() {
-  # 局部名用 __ 前缀：dns_servers 是环境变量键名，同名局部变量会在
-  # env_var 的间接引用（${!key}）中命中空值（bash 动态作用域）
-  local __dns_servers="" __ds ok=0
+  local __dns_servers="" __ds __strategy ok=0
   __dns_servers="$(env_var "dns_servers")"
-  [ -n "${__dns_servers}" ] || {
+  case "${__dns_servers,,}" in
+  off | none | 0 | false | disabled)
     printf '{}'
     return 0
-  }
+    ;;
+  esac
+  # 4.2：未显式配置时默认提供一组加密 DNS（1.1.1.1 + dns.google 双源）
+  [ -n "${__dns_servers}" ] || __dns_servers="https://1.1.1.1/dns-query,https://dns.google/resolve"
   for __ds in ${__dns_servers//,/ }; do
     [ -n "${__ds}" ] || continue
     case "${__ds}" in
     https://* | tls://* | udp://* | h3://* | quic://*) ok=1 ;;
-    *) ok=0
+    *)
+      ok=0
       break
       ;;
     esac
@@ -46,12 +52,122 @@ render_dns_object() {
     printf '{}'
     return 0
   fi
-  jq -n --arg dns_servers "${__dns_servers}" '
+  case "$(manager_env_or_setting "ip_version" "4")" in
+  6 | v6) __strategy="ipv4_and_ipv6" ;;
+  *) __strategy="prefer_ipv4" ;;
+  esac
+  jq -n --arg dns_servers "${__dns_servers}" --arg strategy "${__strategy}" '
     { dns: {
         servers: ($dns_servers | split(",") | map(select(. != "") | { address: . })),
         independent_cache: true,
-        strategy: "ipv4_only"
+        disable_cache: false,
+        cache_capacity: 4096,
+        strategy: $strategy
       } }'
+}
+
+# 1.2：可观测面开关。clash_api 仅监听 127.0.0.1（无暴露风险），secret 随机生成持久化。
+clash_api_enabled() {
+  case "$(manager_env_or_setting "clash_api" "")" in
+  0 | off | no | false) return 1 ;;
+  *) return 0 ;;
+  esac
+}
+
+clash_api_port() {
+  local p
+  p="$(manager_env_or_setting "clash_api_port" "19990")"
+  [[ "${p}" =~ ^[0-9]+$ ]] && [ "${p}" -ge 1 ] && [ "${p}" -le 65535 ] || p="19990"
+  printf '%s' "${p}"
+}
+
+ensure_clash_api_secret() {
+  local s
+  s="$(get_setting "clash_api_secret")"
+  if [ -z "${s}" ]; then
+    s="$(generate_hex 16)"
+    set_setting "clash_api_secret" "${s}"
+  fi
+  printf '%s' "${s}"
+}
+
+# 1.1/1.2：experimental 段——cache_file 连接缓存（重启秒级恢复）+ clash_api 可观测。
+# 生成整段 JSON（{} 表示该节留空），供 render_config 合并。
+render_experimental_object() {
+  local __cache_path
+  mkdir -p "${RUNTIME_DIR}" 2>/dev/null || true
+  __cache_path="${RUNTIME_DIR}/cache.db"
+  if clash_api_enabled; then
+    jq -n \
+      --arg cache_path "${__cache_path}" \
+      --arg controller "127.0.0.1:$(clash_api_port)" \
+      --arg secret "$(ensure_clash_api_secret)" '{
+        experimental: {
+          cache_file: { enabled: true, path: $cache_path },
+          clash_api: { external_controller: $controller, secret: $secret }
+        }
+      }'
+  else
+    jq -n --arg cache_path "${__cache_path}" '{
+      experimental: { cache_file: { enabled: true, path: $cache_path } }
+    }'
+  fi
+}
+
+# 1.2：clash_api 基础 curl。controller 或 secret 缺失/curl 不可用时返回失败。
+clash_api_fetch() {
+  local _p="$1" _out
+  command_exists curl || return 1
+  _out="$(curl -fsS --max-time 4 -H "Authorization: Bearer $(ensure_clash_api_secret)" \
+    "http://127.0.0.1:$(clash_api_port)${_p}" 2>/dev/null || true)"
+  [ -n "${_out}" ] || return 1
+  printf '%s' "${_out}"
+}
+
+# 1.2：活跃连接汇总行（数量 + 上下行速率），供 sbm status 展示。
+clash_api_conn_summary() {
+  local _out _active _down _up _start _elapsed
+  clash_api_enabled || return 1
+  _out="$(clash_api_fetch "/connections" 2>/dev/null || true)"
+  [ -n "${_out}" ] || {
+    print_warn "clash_api 不可达（sing-box 可能未运行或未启用实验面）。"
+    return 1
+  }
+  _active="$(printf '%s' "${_out}" | jq -r '.connections | length // 0' 2>/dev/null || printf 0)"
+  _down="$(printf '%s' "${_out}" | jq -r '.downloadTotal // empty' 2>/dev/null || true)"
+  _up="$(printf '%s' "${_out}" | jq -r '.uploadTotal // empty' 2>/dev/null || true)"
+  _start="$(printf '%s' "${_out}" | jq -r '.startTime // empty' 2>/dev/null || true)"
+  # 速率 = 累计字节 ×8 / 运行秒数（downloadTotal/uploadTotal 为字节）
+  if [[ "${_down}" =~ ^[0-9]+$ ]] && [[ "${_up}" =~ ^[0-9]+$ ]] && [[ "${_start}" =~ ^[0-9.]+$ ]]; then
+    _elapsed="$(awk -v s="${_start}" 'BEGIN { e = systime() - s; printf "%d", e < 0 ? 0 : e }' 2>/dev/null || printf 0)"
+    printf '%s 连接 | 下行 %s | 上行 %s' \
+      "${_active}" \
+      "$(_fmt_mbps "${_down}" "${_elapsed}")" \
+      "$(_fmt_mbps "${_up}" "${_elapsed}")"
+  else
+    printf '%s 连接' "${_active}"
+  fi
+}
+
+# 1.2：watchdog 探活失败时把当前 connections dump 到运行时日志辅助根因定位。
+clash_api_dump_connections() {
+  [ -f "${NODES_FILE}" ] || return 0
+  clash_api_enabled || return 0
+  command_exists curl || return 0
+  local _out
+  _out="$(clash_api_fetch "/connections" 2>/dev/null || true)"
+  [ -n "${_out}" ] || return 0
+  {
+    printf '\n[%s] clash_api connections dump（探活失败快照）：\n' "$(date -Is 2>/dev/null || date +%s)"
+    printf '%s\n' "${_out}" | jq '{downloadTotal, uploadTotal, connections: [(.connections|length)]}' 2>/dev/null || printf '%s\n' "${_out}"
+  } >>"${RUNTIME_DIR}/clash-api-dump.log" 2>/dev/null || true
+}
+
+# 字节→Mbps：bytes ×8 / 秒 / 1e6 = bytes / 秒 / 125000
+_fmt_mbps() {
+  local _b="$1" _s="$2" _mbps=0
+  [ "${_s}" -gt 0 ] 2>/dev/null && _mbps=$((_b / _s / 125000))
+  printf '%s Mbps' "${_mbps}"
 }
 
 render_config() {
@@ -88,9 +204,10 @@ render_config() {
   "info" | "debug") : ;;
   *) log_level="warn" ;;
   esac
-  local dns_object
+  local dns_object experimental_object
   dns_object="$(render_dns_object)"
-  if ! jq -n --arg log_path "${BASE_DIR}/logs/sing-box.log" --arg log_level "${log_level}" --argjson inbounds "${inbounds_json}" --argjson dns_object "${dns_object}" '{
+  experimental_object="$(render_experimental_object)"
+  if ! jq -n --arg log_path "${BASE_DIR}/logs/sing-box.log" --arg log_level "${log_level}" --argjson inbounds "${inbounds_json}" --argjson dns_object "${dns_object}" --argjson experimental "${experimental_object}" '{
     log: {
       level: $log_level,
       timestamp: true,
@@ -102,9 +219,14 @@ render_config() {
     ],
     route: {
       final: "direct",
-      auto_detect_interface: true
+      auto_detect_interface: true,
+      sniff: {
+        enabled: true,
+        timeout: "300ms",
+        override_destination: true
+      }
     }
-  } + $dns_object' >"${tmp}"; then
+  } + $dns_object + $experimental' >"${tmp}"; then
     rm -f "${tmp}"
     print_err "写入 sing-box 配置失败。"
     return 1
@@ -176,7 +298,7 @@ node_meta_array() {
 
 render_inbound_for_tag() {
   local tag="$1"
-  local protocol name port uuid password cert_file key_file ws_path reality_server tcp_fast_open
+  local protocol name port uuid password cert_file key_file ws_path reality_server
   local up_mbps down_mbps bbr_profile private_key short_id
   local __tfo
 
@@ -191,8 +313,6 @@ render_inbound_for_tag() {
   short_id="${NODE_META[7]}"
   reality_server="${NODE_META[8]}"
   ws_path="${NODE_META[12]}"
-  ws_mode="${NODE_META[13]}"
-  cert_mode="${NODE_META[16]}"
   cert_file="${NODE_META[17]}"
   key_file="${NODE_META[18]}"
   up_mbps="${NODE_META[22]}"
@@ -236,7 +356,7 @@ render_inbound_for_tag() {
               enabled: true,
               handshake: { server: $server, server_port: 443 },
               private_key: $private_key,
-              short_id: [$short_id]
+              short_id: ($short_id | split(",") | map(select(. != "")))
             }
           }
         }'
@@ -408,4 +528,3 @@ render_inbound_for_tag() {
     ;;
   esac
 }
-

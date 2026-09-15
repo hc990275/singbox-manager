@@ -199,6 +199,19 @@ iter_node_tags() {
   jq -r 'keys[]' "${NODES_FILE}" 2>/dev/null | tr -d '\r'
 }
 
+# 9.3：jq 批量化——一次启动输出全部节点 protocol/port/argo_mode（TSV，@tsv 转义 tab/换行）。
+# 由调用方定读法（read -r tag protocol port mode），供 watchdog/argo 替代逐节点 node_value 多次 jq。
+# 字段顺序与 node_value 语义一致：protocol / port / argo_mode。
+node_meta_bulk() {
+  if [ ! -f "${NODES_FILE}" ]; then
+    return 0
+  fi
+  jq -r 'to_entries[] | [.key,
+       (.value.protocol // ""),
+       ((.value.port // "") | tostring),
+       (.value.argo_mode // "")] | @tsv' "${NODES_FILE}" 2>/dev/null | tr -d '\r'
+}
+
 delete_node_records() {
   local tag="$1"
   json_delete_record "${NODES_FILE}" "$tag"
@@ -309,4 +322,3 @@ rotate_log_file() {
   chmod 600 "$file" "${file}.1" || return 1
   return 0
 }
-

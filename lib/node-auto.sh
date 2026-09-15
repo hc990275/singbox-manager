@@ -1,3 +1,29 @@
+#!/usr/bin/env bash
+set -eEuo pipefail
+
+umask 077
+
+# 3.1：Reality multi short_id——短 ID 以逗号分隔配置（ENV short_ids），
+# 过滤掉非法的十六进制/奇数长度/超长 token；无合法项时返回失败由调用方生成默认单 ID。
+resolve_short_ids() {
+  local raw="$1" tok out=""
+  local -a tokens
+  [ -n "${raw}" ] || return 1
+  raw="$(printf '%s' "${raw}" | tr -d ' \r\n')"
+  IFS=',' read -r -a tokens <<<"${raw}"
+  for tok in "${tokens[@]}"; do
+    if [[ "${tok}" =~ ^[0-9a-fA-F]+$ ]] && [ $((${#tok} % 2)) -eq 0 ] &&
+      [ "${#tok}" -ge 2 ] && [ "${#tok}" -le 32 ]; then
+      if [ -n "${out}" ]; then
+        out="${out},"
+      fi
+      out="${out}${tok,,}"
+    fi
+  done
+  [ -n "${out}" ] || return 1
+  printf '%s' "${out}"
+}
+
 auto_cert_bundle() {
   local tag="$1"
   local domain="$2"
@@ -52,7 +78,11 @@ auto_add_vless_reality() {
     print_err "无法解析 Reality 密钥对，跳过 vlrt 节点。"
     return 1
   fi
-  short_id="$(generate_hex 4)"
+  # 3.1：ENV short_ids 逗号分隔多 short_id（集群客户端用不同短 ID 做入口区分），
+  # 无合法项时回退生成单个默认短 ID
+  if ! short_id="$(resolve_short_ids "$(env_var "short_ids")")"; then
+    short_id="$(generate_hex 4)"
+  fi
 
   node_json="$(jq -n \
     --arg protocol "vless-reality" \
