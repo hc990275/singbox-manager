@@ -641,7 +641,7 @@ assert_eval_true "buffer 受内存上限约束" '( B=$(calculate_net_tune_buffer
 mkdir -p "${TEST_ROOT}/speedtest"
 cat >"${TEST_ROOT}/speedtest/speedtest" <<'EOF'
 #!/usr/bin/env bash
-# v1.5.5：支持 -j/--output-type=json 的版本输出结构化 JSON，否则回退人类文本
+# v1.5.6：支持 -j/--output-type=json 的版本输出结构化 JSON，否则回退人类文本
 case " $* " in
 *" --output-type=json "*)
   printf '%s\n' '{"type":"result","ping":{"jitter":1.5,"latency":12.34,"low":11,"high":13},"download":{"bandwidth":812340000,"bytes":101542500,"elapsed":1000},"upload":{"bandwidth":300780000,"bytes":37597500,"elapsed":1000}}'
