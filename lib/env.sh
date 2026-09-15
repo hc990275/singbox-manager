@@ -66,33 +66,6 @@ sbm_load_all() {
   done
 }
 
-PROJECT_NAME="${PROJECT_NAME:-Singbox Manager}"
-BASE_DIR="${BASE_DIR:-/usr/local/etc/singbox-manager}"
-LIB_DIR="${LIB_DIR:-/usr/local/lib/singbox-manager}"
-CONFIG_FILE="${CONFIG_FILE:-${BASE_DIR}/config.json}"
-NODES_FILE="${NODES_FILE:-${BASE_DIR}/nodes.json}"
-SECRETS_FILE="${SECRETS_FILE:-${BASE_DIR}/secrets.json}"
-SETTING_FILE="${SETTING_FILE:-${BASE_DIR}/settings.json}"
-CERT_DIR="${CERT_DIR:-${BASE_DIR}/certs}"
-LOG_DIR="${LOG_DIR:-${BASE_DIR}/logs}"
-RUNTIME_DIR="${RUNTIME_DIR:-${BASE_DIR}/runtime}"
-LOCK_FILE="${LOCK_FILE:-${BASE_DIR}/.lock}"
-LOCK_TIMEOUT="${LOCK_TIMEOUT:-30}"
-LOG_ROTATE_SIZE_MB="${LOG_ROTATE_SIZE_MB:-50}"
-LOG_ROTATE_BACKUPS="${LOG_ROTATE_BACKUPS:-3}"
-
-SINGBOX_BIN="${SINGBOX_BIN:-/usr/local/bin/sing-box}"
-CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-/usr/local/bin/cloudflared}"
-SERVICE_NAME="${SERVICE_NAME:-singbox-manager}"
-DEFAULT_CDN_DOMAIN="${DEFAULT_CDN_DOMAIN:-saas.sin.fan}"
-
-COLOR_GREEN="\033[1;32m"
-COLOR_YELLOW="\033[1;33m"
-COLOR_RED="\033[1;31m"
-COLOR_BLUE="\033[1;34m"
-COLOR_RESET="\033[0m"
-COLOR_NUM_HL="\033[1;92m"
-
 require_bash4() {
   if [ -z "${BASH_VERSION:-}" ] || [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
     echo "需要 bash 4.0 及以上版本（当前：${BASH_VERSION:-未知}）。" >&2

@@ -55,21 +55,21 @@ EOF
         print_warn "WS-TLS 节点 ${tag} 使用默认优选域名 ${DEFAULT_CDN_DOMAIN}：仅当该域名已接入本机前置 CDN 时可用，否则请把 cdn_host 设为你自己的域名或改用 ws_mode=direct 直连。"
       fi
       cdn_sni="${cdn_sni:-${preferred_domain}}"
-      # 批量编码 cdn_sni×2 + ws_path + name（原每字段一个 url_encode=1 jq 子进程）
-      { read -r cdn_sni_enc; read -r cdn_sni_enc2; read -r ws_path_enc; read -r name_enc; } <<EOF
-$(url_encode_many "${cdn_sni}" "${cdn_sni}" "${ws_path}" "${name}")
+      # 批量编码 cdn_sni×2 + ws_path（一次 jq 子进程）
+      { read -r cdn_sni_enc; read -r cdn_sni_enc2; read -r ws_path_enc; } <<EOF
+$(url_encode_many "${cdn_sni}" "${cdn_sni}" "${ws_path}")
 EOF
-      printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s#%s' \
+      printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s' \
         "$uuid" "$(wrap_host "$preferred_domain")" "$cdn_port" \
-        "${cdn_sni_enc}" "${cdn_sni_enc2}" "${ws_path_enc}" "${name_enc}"
+        "${cdn_sni_enc}" "${cdn_sni_enc2}" "${ws_path_enc}"
     else
       # 直连模式：客户端连服务器 IP + wspt，SNI/Host 均走 WS Host 域名（自签证书跳过校验）
-      # 批量编码 host_domain×2（sni+host）+ ws_path + name（一次 jq 子进程）
-      { read -r sni_enc; read -r host_enc; read -r ws_path_enc; read -r name_enc; } <<EOF
-$(url_encode_many "${host_domain}" "${host_domain}" "${ws_path}" "${name}")
+      # 批量编码 host_domain×2（sni+host）+ ws_path（一次 jq 子进程）
+      { read -r sni_enc; read -r host_enc; read -r ws_path_enc; } <<EOF
+$(url_encode_many "${host_domain}" "${host_domain}" "${ws_path}")
 EOF
-      printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s#%s' \
-        "$uuid" "$host" "$port" "${sni_enc}" "${host_enc}" "${ws_path_enc}" "${name_enc}"
+      printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s' \
+        "$uuid" "$host" "$port" "${sni_enc}" "${host_enc}" "${ws_path_enc}"
     fi
     # 自签证书固定指纹仅在直连模式有意义：客户端直连本机、面对的就是该自签证书。
     # CDN 模式客户端面对的是前置 CDN（如 Cloudflare）边缘的公开证书，不能固定源站自签指纹，否则必然校验失败。
@@ -83,6 +83,7 @@ EOF
         printf '&allowInsecure=1'
       fi
     fi
+    # 指纹参数必须作为 query 输出在 # 之前；fragment 只输出一次，名称仅编码一遍
     printf '#%s' "$(url_encode "$name")"
     ;;
   anytls)

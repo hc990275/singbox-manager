@@ -17,7 +17,7 @@ set -eEuo pipefail
 #   mtp_ip_mode   监听模式 v4 / v6 / dual（可选，默认 v4）
 ###############################################################################
 
-SCRIPT_VERSION="1.5.3"
+SCRIPT_VERSION="1.5.4"
 
 # MTG GO 版本与校验：上游 jyucoeng/singbox-tools 的 Go 构建镜像
 MTP_WORKDIR="/opt/mtproxy"
@@ -28,6 +28,26 @@ MTP_SERVICE="mtp"
 MTP_DOWNLOAD_BASE="https://github.com/jyucoeng/singbox-tools/releases/download/Go-Rust"
 # 参考实现内置伪装域名（上游生成器同款列表）
 MTP_FAKE_DOMAINS=("www.apple.com" "www.microsoft.com" "www.amazon.com" "www.bing.com" "www.mozilla.org")
+
+# 由 go.conf（或显式参数）生成 mtg-go simple-run 命令行；IP_MODE 决定监听地址：
+# v4=0.0.0.0 / v6=only-ipv6 [::] / dual=prefer-ipv6 [::]。
+# 安装与"无服务管理器"重启路径共用，避免两处各写一遍导致 IP_MODE 被忽略。
+mtp_run_args() {
+  local port="${1:-}"
+  local secret="${2:-}"
+  local ip_mode="${3:-}"
+  local net_args
+  [ -n "${port}" ] || port="$(grep -m1 '^PORT=' "${MTP_CONF}" | cut -d= -f2)"
+  [ -n "${secret}" ] || secret="$(grep -m1 '^SECRET=' "${MTP_CONF}" | cut -d= -f2)"
+  [ -n "${ip_mode}" ] || ip_mode="$(grep -m1 '^IP_MODE=' "${MTP_CONF}" | cut -d= -f2)"
+  ip_mode="${ip_mode:-v4}"
+  case "${ip_mode}" in
+  v6) net_args="-i only-ipv6 [::]:${port}" ;;
+  dual) net_args="-i prefer-ipv6 [::]:${port}" ;;
+  *) net_args="-i only-ipv4 0.0.0.0:${port}" ;;
+  esac
+  printf '%s' "simple-run -n 1.1.1.1 -t 30s -a 1mb -c 65535 ${net_args} ${secret}"
+}
 
 # 颜色输出（非 TTY 或 NO_COLOR 时禁用）
 supports_color() {
@@ -216,18 +236,12 @@ mtp_install_binary() {
 
 mtp_create_service() {
   local port="$1" secret="$2" domain="$3" ip_mode="$4"
-  local hex_domain full_secret net_args cmd_line
+  local hex_domain full_secret cmd_line
 
   hex_domain="$(echo -n "${domain}" | od -A n -t x1 | tr -d ' \n')"
   full_secret="ee${secret}${hex_domain}"
 
-  case "${ip_mode}" in
-  v6) net_args="-i only-ipv6 [::]:${port}" ;;
-  dual) net_args="-i prefer-ipv6 [::]:${port}" ;;
-  *) net_args="-i only-ipv4 0.0.0.0:${port}" ;;
-  esac
-
-  cmd_line="${MTP_BIN_DIR}/mtg-go simple-run -n 1.1.1.1 -t 30s -a 1mb -c 65535 ${net_args} ${full_secret}"
+  cmd_line="${MTP_BIN_DIR}/mtg-go $(mtp_run_args "${port}" "${full_secret}" "${ip_mode}")"
 
   mkdir -p "${MTP_WORKDIR}"
   cat > "${MTP_CONF}" <<EOF
@@ -265,7 +279,7 @@ EOF
 name="${MTP_SERVICE}"
 description="MTProto Proxy (Go)"
 command="${MTP_BIN_DIR}/mtg-go"
-command_args="simple-run -n 1.1.1.1 -t 30s -a 1mb -c 65535 ${net_args} ${full_secret}"
+command_args="$(mtp_run_args "${port}" "${full_secret}" "${ip_mode}")"
 pidfile="/run/${MTP_SERVICE}.pid"
 command_background="true"
 rc_ulimit="-n 65535"
@@ -409,7 +423,7 @@ mtp_restart() {
     if [ -f "${MTP_WORKDIR}/mtp.pid" ]; then
       kill "$(cat "${MTP_WORKDIR}/mtp.pid")" >/dev/null 2>&1 || true
     fi
-    nohup sh -c "${MTP_BIN_DIR}/mtg-go simple-run -n 1.1.1.1 -t 30s -a 1mb -c 65535 -i only-ipv4 0.0.0.0:$(grep -m1 '^PORT=' "${MTP_CONF}" | cut -d= -f2) $(grep -m1 '^SECRET=' "${MTP_CONF}" | cut -d= -f2) >>${MTP_LOG} 2>&1" >/dev/null 2>&1 &
+    nohup sh -c "${MTP_BIN_DIR}/mtg-go $(mtp_run_args) >>${MTP_LOG} 2>&1" >/dev/null 2>&1 &
     echo $! > "${MTP_WORKDIR}/mtp.pid"
     mtp_print_ok "已重启 ${MTP_SERVICE}（pid: $(cat "${MTP_WORKDIR}/mtp.pid")）。"
     ;;

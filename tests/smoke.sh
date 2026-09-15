@@ -216,11 +216,14 @@ json_set_record "${SECRETS_FILE}" "nws-direct" '{"uuid":"uwsd"}'
 assert_eval_true "WS 直连 authority 用服务器 IP" 'build_share_link nws-direct | grep -q "@203.0.113.10:20835"'
 assert_eval_true "WS 直连 sni/host 用 WS Host 域名" 'build_share_link nws-direct | grep -q "sni=ws.example.com&type=ws&host=ws.example.com"'
 assert_eval_true "WS 直连自签无证书时回退 allowInsecure=1" 'build_share_link nws-direct | grep -q "allowInsecure=1"'
+assert_eval_true "WS 直连 allowInsecure 在 query 段（位于 # 之前）" 'build_share_link nws-direct | grep -q "&allowInsecure=1#WS-Direct$"'
+assert_eval_true "WS 直连链接 fragment 唯一（仅 1 个 #）" 'l="$(build_share_link nws-direct)"; [ -n "${l#*#}" ] && [[ "${l#*#}" != *"#"* ]]'
 json_set_record "${NODES_FILE}" "nws-pin" '{"protocol":"vless-ws-tls","name":"WS-Pin","port":20835,"host_domain":"ws.example.com","ws_path":"/p","certificate_mode":"self-signed","ws_mode":"direct"}'
 json_set_record "${SECRETS_FILE}" "nws-pin" '{"uuid":"uwsp"}'
 ws_pin_pair="$(ensure_tls_material tag_wspin ws.example.com)"
 json_set_field "${NODES_FILE}" "nws-pin" "certificate_path" "${ws_pin_pair%|*}"
 assert_eval_true "WS 自签有证书时输出 pcs=pinnedPeerCertSha256" 'build_share_link nws-pin | grep -q "pcs=[0-9a-f]\{64\}"'
+assert_eval_true "WS pcs 在 query 段且 fragment 唯一" 'build_share_link nws-pin | grep -q "&pcs=[0-9a-f]\{64\}#WS-Pin$"'
 assert_eval_false "WS pcs 链接不再含 allowInsecure" 'build_share_link nws-pin | grep -q "allowInsecure=1"'
 json_set_record "${NODES_FILE}" "nws-cdn" '{"protocol":"vless-ws-tls","name":"WS-CDN","port":20835,"preferred_domain":"cdn.example.com","host_domain":"ws.example.com","ws_path":"/p","certificate_mode":"custom","ws_mode":"cdn","cdn_port":8443}'
 json_set_record "${SECRETS_FILE}" "nws-cdn" '{"uuid":"uwsc"}'
@@ -736,6 +739,12 @@ assert_eval_false "env_port 非法拒绝" 'env_port 0x1F'
 # secret = 00000000000000000000000000000000, domain = apple.com
 # FULL 原始字节 = ee + 16x00 + "apple.com"，base64 url-safe 无 padding
 assert_eq "mtp_tg_secret 全零密钥 apple.com" "7gAAAAAAAAAAAAAAAAAAAABhcHBsZS5jb20" "$(mtp_tg_secret "00000000000000000000000000000000" "apple.com")"
+
+# mtp_run_args：IP_MODE 决定监听地址（v4/v6/dual），安装与无服务管理器重启共用
+assert_eq "mtp_run_args v4 模式" "simple-run -n 1.1.1.1 -t 30s -a 1mb -c 65535 -i only-ipv4 0.0.0.0:20086 eeabcd" "$(mtp_run_args 20086 eeabcd v4)"
+assert_eq "mtp_run_args v6 模式" "simple-run -n 1.1.1.1 -t 30s -a 1mb -c 65535 -i only-ipv6 [::]:20086 eeabcd" "$(mtp_run_args 20086 eeabcd v6)"
+assert_eq "mtp_run_args dual 模式" "simple-run -n 1.1.1.1 -t 30s -a 1mb -c 65535 -i prefer-ipv6 [::]:20086 eeabcd" "$(mtp_run_args 20086 eeabcd dual)"
+assert_eval_true "mtp_run_args 空模式回退 v4" 'mtp_run_args 20086 eeabcd | grep -q "only-ipv4 0.0.0.0:20086"'
 
 # 生成的 tg 链接可解码回原文：0xee + secret(16字节) + domain ascii
 assert_eval_true "mtp_tg_secret 可解码回原文" 's="$(mtp_tg_secret "cafebabecafebabecafebabecafebabe" "www.apple.com")"; p="$(printf %s "$s" | sed "s/-/+/g;s/_/\//g")"; while [ $(( ${#p} % 4 )) -ne 0 ]; do p="$p="; done; h="$(printf %s "$p" | base64 -d 2>/dev/null | od -A n -t x1 | tr -d " \n")"; [[ "$h" == "eecafebabecafebabecafebabecafebabe7777772e6170706c652e636f6d" ]]'

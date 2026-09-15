@@ -94,7 +94,7 @@ auto_add_vless_ws_tls() {
   case "${ws_mode}" in
   direct | cdn) ;;
   *)
-    print_warn "ws_mode=${ws_mode} 非法，回退 direct（可选值：direct|c_dn）。"
+    print_warn "ws_mode=${ws_mode} 非法，回退 direct（可选值：direct|cdn）。"
     ws_mode="direct"
     ;;
   esac
