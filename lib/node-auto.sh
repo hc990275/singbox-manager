@@ -511,7 +511,7 @@ auto_install() {
     cleanup_orphan_certs
   fi
   render_config
-  start_service
+  reload_service
   # 事务已提交：清除回滚标记，此后失败不再触发整事务回滚
   _AUTO_ROLLBACK_DIR=""
   # 隧道启动失败（如临时域名等待超时）不应判定整次安装失败

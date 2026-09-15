@@ -122,15 +122,47 @@ probe_tcp_port() {
   fi
 }
 
+# P2：TCP 类节点协议 —— 探活/就绪自检只对它们有意义。
+# tuic-v5 与 hy2 为纯 UDP(QUIC) 监听，TCP 探活永远失败，绝不能纳入探活集。
+tcp_probeable_protocol() {
+  local protocol="$1"
+  case "${protocol}" in
+  vless-reality | vless-ws-tls | anytls | vless-argo | socks5) return 0 ;;
+  esac
+  return 1
+}
+
+# P2：当前 TCP 可探活节点数量（无节点或无 TCP 类节点时输出 0）。
+tcp_probeable_node_count() {
+  local tag protocol cnt=0
+  [ -f "${NODES_FILE}" ] || {
+    printf '0'
+    return 0
+  }
+  while IFS= read -r tag; do
+    [ -n "${tag}" ] || continue
+    protocol="$(node_value "$tag" "protocol")"
+    if tcp_probeable_protocol "${protocol}"; then
+      cnt=$((cnt + 1))
+    fi
+  done < <(iter_node_tags)
+  printf '%s' "${cnt}"
+}
+
 any_node_port_alive() {
-  local tag port  _status=1
+  local tag port protocol _status=1
   local -a jobs=()
   [ -f "${NODES_FILE}" ] || return 1
   if [ "${SBM_PROBE_PARALLEL:-1}" = "1" ]; then
     # A2：全节点端口并行探活，任一成功即判定存活；
     # 10 个死节点从串行 ≈20s 降到 ≈SBM_PROBE_TIMEOUT_S（默认 2s）。
+    # P2：仅探 TCP 类协议，hy2/tuic 纯 UDP 节点一律跳过（TCP 探活不适用）。
     while IFS= read -r tag; do
       [ -n "${tag}" ] || continue
+      protocol="$(node_value "$tag" "protocol" 2>/dev/null || true)"
+      if ! tcp_probeable_protocol "${protocol}"; then
+        continue
+      fi
       port="$(node_value "$tag" "port" 2>/dev/null || true)"
       [ -n "${port}" ] || continue
       probe_tcp_port "127.0.0.1" "${port}" "${SBM_PROBE_TIMEOUT_S:-2}" &
@@ -147,12 +179,30 @@ any_node_port_alive() {
   fi
   while IFS= read -r tag; do
     [ -n "${tag}" ] || continue
+    protocol="$(node_value "$tag" "protocol" 2>/dev/null || true)"
+    if ! tcp_probeable_protocol "${protocol}"; then
+      continue
+    fi
     port="$(node_value "$tag" "port" 2>/dev/null || true)"
     [ -n "${port}" ] || continue
     if probe_tcp_port "127.0.0.1" "${port}" "${SBM_PROBE_TIMEOUT_S:-2}"; then
       return 0
     fi
   done < <(iter_node_tags)
+  return 1
+}
+
+# P2：数据面探活三态。
+#   0=有 TCP 节点且任一可探活（健康）
+#   1=存在 TCP 节点但全部不可探活（假死候选）
+#   2=无可 TCP 探活节点（全 UDP/空，不适用，调用方以进程存活为准）
+singbox_probe_status() {
+  local cnt
+  cnt="$(tcp_probeable_node_count)"
+  [ "${cnt}" -gt 0 ] || return 2
+  if any_node_port_alive; then
+    return 0
+  fi
   return 1
 }
 

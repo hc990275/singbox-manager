@@ -26,7 +26,7 @@ delete_all_nodes() {
   done < <(iter_node_tags)
   wipe_records
   render_config
-  start_service
+  reload_service
   sanitize_permissions
   release_lock
   print_ok "已删除全部节点（含证书）并重启服务。"
@@ -127,7 +127,7 @@ delete_node() {
   remove_node_certificates "$tag" "$cert_file" "$key_file"
   invalidate_port_caches
   render_config || true
-  start_service || true
+  reload_service || true
   sanitize_permissions
   release_lock
   print_ok "已删除节点：${tag}"

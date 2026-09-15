@@ -444,7 +444,7 @@ assert_eq "B4 混入非法源整体不渲染" "{}" "$(dns_servers='https://1.1.1
 assert_eval_true "A2 并行探活：存活端口在最后仍快速返回真（串行≈2s/并行≈1s）" '
   ( probe_tcp_port() { [ "$2" = "11111" ] && return 0; sleep "${3:-2}"; return 1; }
     iter_node_tags() { printf "pa\npb\npc\n"; }
-    node_value() { [ "$2" = "port" ] || return 1; case "$1" in pa|pb) printf "22222" ;; pc) printf "11111" ;; *) return 1 ;; esac; }
+    node_value() { case "$2" in protocol) printf "vless-reality"; return 0 ;; port) case "$1" in pa|pb) printf "22222" ;; pc) printf "11111" ;; *) return 1 ;; esac ;; *) return 1 ;; esac; }
     SBM_PROBE_TIMEOUT_S=1
     SECONDS=0
     if any_node_port_alive; then rc=0; else rc=1; fi
@@ -453,14 +453,14 @@ assert_eval_true "A2 并行探活：存活端口在最后仍快速返回真（�
 assert_eval_false "A2 并行探活：全部死端口快速失败" '
   ( probe_tcp_port() { sleep "${3:-2}"; return 1; }
     iter_node_tags() { printf "pa\npb\n"; }
-    node_value() { [ "$2" = "port" ] || return 1; printf "22222"; }
+    node_value() { case "$2" in protocol) printf "vless-reality"; return 0 ;; port) printf "22222" ;; *) return 1 ;; esac; }
     SBM_PROBE_TIMEOUT_S=1
     if any_node_port_alive; then exit 0; else exit 1; fi )
 '
 assert_eval_true "A2 串行回退：存活端口返回真" '
   ( probe_tcp_port() { [ "$2" = "11111" ] && return 0; sleep "${3:-2}"; return 1; }
     iter_node_tags() { printf "pa\npb\n"; }
-    node_value() { [ "$2" = "port" ] || return 1; case "$1" in pb) printf "11111" ;; *) printf "22222" ;; esac; }
+    node_value() { case "$2" in protocol) printf "vless-reality"; return 0 ;; port) case "$1" in pb) printf "11111" ;; *) printf "22222" ;; esac ;; *) return 1 ;; esac; }
     SBM_PROBE_PARALLEL=0
     if any_node_port_alive; then exit 0; else exit 1; fi )
 '
@@ -506,6 +506,36 @@ rm -f "${RUNTIME_DIR}/ntest.restart_count"
 
 # S1：端口探活纯探测函数（本机未监听某高端口 -> 失败）
 assert_eval_false "probe_tcp_port 未监听端口失败" 'probe_tcp_port 127.0.0.1 65123 1'
+
+# P2：TCP 可探活协议分类（hy2/tuic 纯 UDP 排除，避免 watchdog 误判假死）
+assert_eval_true "P2 tcp_probeable_protocol reality" 'tcp_probeable_protocol vless-reality'
+assert_eval_true "P2 tcp_probeable_protocol argo" 'tcp_probeable_protocol vless-argo'
+assert_eval_false "P2 tcp_probeable_protocol hy2" 'tcp_probeable_protocol hy2'
+assert_eval_false "P2 tcp_probeable_protocol tuic" 'tcp_probeable_protocol tuic'
+assert_eval_false "P2 tcp_probeable_protocol 未知" 'tcp_probeable_protocol unknown'
+
+# P3：就绪自检核心 await_tcp_ports（python3 起真实监听；缺失则跳过）
+if command_exists python3; then
+  python3 - <<'PY' &
+import socket, time, sys
+socks = []
+for port in (65124, 65125):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", port))
+    s.listen(1)
+    socks.append(s)
+time.sleep(30)
+PY
+  _lp=$!
+  sleep 1
+  assert_eval_true "P3 await_tcp_ports 监听中返回 0" 'await_tcp_ports 127.0.0.1 "65124 65125" 2'
+  assert_eval_false "P3 await_tcp_ports 未监听端口返回 1" 'await_tcp_ports 127.0.0.1 "65126" 1'
+  assert_eval_true "P3 await_tcp_ports 空端口列表返回 0" 'await_tcp_ports 127.0.0.1 "" 1'
+  kill "${_lp}" 2>/dev/null || true
+else
+  printf '[提示] 无 python3，跳过 P3 监听探活断言\n' >&2
+fi
 
 # P5：GOGC 开关 / 内存上限解析 / 网络调优开关 / 智能 buffer 档位
 assert_eval_false "go_gc 默认不启用" 'go_gc_requested'
@@ -585,6 +615,7 @@ export NET_TUNE_SKIP_SPEEDTEST=1 NET_TUNE_SKIP_CONFIRM=1
 assert_eval_true "一键安装 6 协议成功" '( auto_install ins )'
 assert_eq "一键安装写入 6 个节点" "6" "$(jq length "${NODES_FILE}")"
 assert_eq "config 生成 6 个 inbound" "6" "$(jq '.inbounds | length' "${CONFIG_FILE}")"
+assert_eq "P2 一键安装 6 节点中 TCP 可探活数" "4" "$(tcp_probeable_node_count)"
 assert_eval_true "Reality inbound 正确" 'jq -e ".inbounds[] | select(.type == \"vless\" and .tls.reality.enabled == true)" "${CONFIG_FILE}" >/dev/null'
 assert_eval_true "TUIC inbound 正确" 'jq -e ".inbounds[] | select(.type == \"tuic\")" "${CONFIG_FILE}" >/dev/null'
 assert_eval_true "HY2 inbound 带宽生效" 'jq -e ".inbounds[] | select(.type == \"hysteria2\" and .up_mbps == 100)" "${CONFIG_FILE}" >/dev/null'
@@ -619,6 +650,30 @@ else
   printf '[提示] systemd/openrc 托管环境：跳过 stub 进程存活断言\n' >&2
 fi
 
+# P1：热重载语义。standalone 沙箱下 stub(脚本) 与 sing-box 二进制身份不匹配，
+# 因此运行中路径验证"回退完整重启仍返回 0"；未运行路径验证"回退启动并写 PID"。
+if ! systemd_available && ! openrc_available; then
+  _p="$(read_pid_file "${PID_FILE}" 2>/dev/null || true)"
+  if [ -n "${_p}" ] && kill -0 "${_p}" 2>/dev/null; then
+    assert_eval_true "P1 running_singbox_pid 有运行实例时返回输出" 'running_singbox_pid >/dev/null'
+    assert_eval_true "P1 运行中 reload_service 返回 0" 'reload_service'
+    _p2="$(read_pid_file "${PID_FILE}" 2>/dev/null || true)"
+    assert_eval_true "P1 回退重启后 PID 文件仍有有效实例" '[ -n "${_p2:-}" ] && kill -0 "${_p2}" 2>/dev/null'
+  else
+    printf '[提示] 无运行 stub，跳过 P1 运行态断言\n' >&2
+  fi
+  rm -f "${PID_FILE}"
+  assert_eval_false "P1 无实例时 running_singbox_pid 为空" 'running_singbox_pid'
+  assert_eval_true "P1 未运行时 reload_service 回退完整启动" '
+    reload_service
+    _p3="$(read_pid_file "${PID_FILE}" 2>/dev/null || true)"
+    [ -n "${_p3}" ] && kill -0 "${_p3}" 2>/dev/null
+  '
+  kill_pid_file "${PID_FILE}" || true
+else
+  printf '[提示] systemd/openrc 托管环境：跳过 P1 热重载进程断言\n' >&2
+fi
+
 # S4：sing-box check 失败时拒写配置（fail-closed，保留旧配置）
 cp "${CONFIG_FILE}" "${TEST_ROOT}/config.before"
 assert_eval_false "check 失败 render_config 拒写" '( SINGBOX_BIN="/bin/false"; render_config )'
@@ -643,6 +698,7 @@ export vlrt=21831 hypt=21832
 assert_eval_true "rep 重建成功" '( auto_install rep )'
 assert_eq "rep 后只剩新节点" "2" "$(jq length "${NODES_FILE}")"
 assert_eq "rep 后 config 为 2 个 inbound" "2" "$(jq '.inbounds | length' "${CONFIG_FILE}")"
+assert_eq "P2 rep 后 TCP 可探活数（hy2 排除）" "1" "$(tcp_probeable_node_count)"
 
 # P0 回归：rep 输入非法端口时先失败且不清空已有节点（预校验先于清空）
 vlrt=99999
@@ -655,6 +711,7 @@ vlrt=21831
 assert_eval_true "证书文件存在（hy2 自签）" '[ "$(find "${CERT_DIR}" -type f | wc -l)" -gt 0 ]'
 assert_eval_true "delete_all_nodes 成功" '( delete_all_nodes )'
 assert_eq "delall 后无残留证书" "0" "$(find "${CERT_DIR}" -type f | wc -l)"
+assert_eq "P2 空节点后探活态为不适用(2)" "2" "$(singbox_probe_status 2>/dev/null && printf '0' || printf '%s' "$?")"
 
 # 清理 stub 进程
 kill_pid_file "${PID_FILE}" || true

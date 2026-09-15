@@ -361,6 +361,107 @@ ensure_low_memory_guard() {
   fi
 }
 
+# P1：返回正在运行的 sing-box 实例 PID（systemd 取 MainPID，其余读 PID_FILE），
+# 未运行或 PID 非法时返回 1。不做二进制身份校验，交由调用方决定是否可信。
+running_singbox_pid() {
+  local pid
+  if systemd_available; then
+    pid="$(systemctl show -p MainPID --value "${SERVICE_NAME}" 2>/dev/null || true)"
+    [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || return 1
+    printf '%s' "${pid}"
+    return 0
+  fi
+  pid="$(read_pid_file "${PID_FILE}" 2>/dev/null || true)"
+  [ -n "${pid}" ] || return 1
+  printf '%s' "${pid}"
+  return 0
+}
+
+# P1：SIGHUP 优雅热重载。sing-box 收到 HUP 后平滑重载 config.json：
+# 存量连接不断、新连接按新配置（节点/证书/密钥/DNS/keepalive 等变更均适用）。
+# 语义：
+#   - 服务运行且 PID 确为 sing-box 实例 → 校验新配置后发 SIGHUP；
+#   - 配置校验失败 → fail-closed，拒绝热重载并返回 1（保留运行中配置）；
+#   - 服务未运行 / PID 身份不符 / 信号失败 → 回退完整 start_service。
+#   就绪自检（P3）在非测试环境于热重载后执行，端口未监听时给出明确报错。
+reload_service() {
+  local pid
+  pid="$(running_singbox_pid 2>/dev/null || true)"
+  if [ -n "${pid}" ] && pid_matches_binary_or_alive "${pid}" "${SINGBOX_BIN}"; then
+    if ! "${SINGBOX_BIN}" check -c "${CONFIG_FILE}" >/dev/null 2>&1; then
+      print_err "配置校验失败，已拒绝热重载（保留现有运行配置）。"
+      return 1
+    fi
+    if kill -HUP "${pid}" >/dev/null 2>&1; then
+      print_ok "已向运行中的 sing-box（pid ${pid}）发送 SIGHUP，热重载配置。"
+      if [ "${SBM_TEST_MODE:-0}" != "1" ]; then
+        verify_data_plane_ready || true
+      fi
+      return 0
+    fi
+    print_warn "SIGHUP 热重载失败，回退为完整重启。"
+  else
+    print_info "服务未运行或实例不匹配，走完整启动。"
+  fi
+  start_service
+  if [ "${SBM_TEST_MODE:-0}" != "1" ]; then
+    verify_data_plane_ready || true
+  fi
+  return 0
+}
+
+# P3：等待一组 TCP 端口可探活（就绪自检核心，SBM_READINESS_RETRIES 次重试，
+# 每次探活 1s 超时、间隔 1s）。UDP 节点不在此列（见 verify_data_plane_ready）。
+await_tcp_ports() {
+  local host="$1" ports="$2" tries="${3:-${SBM_READINESS_RETRIES:-3}}"
+  local attempt port all_ok
+  [ -n "${ports}" ] || return 0
+  [[ "${tries}" =~ ^[1-9][0-9]*$ ]] || tries=3
+  for ((attempt = 1; attempt <= tries; attempt++)); do
+    all_ok=1
+    for port in ${ports}; do
+      [[ "${port}" =~ ^[0-9]+$ ]] || continue
+      if ! probe_tcp_port "${host}" "${port}" 1; then
+        all_ok=0
+        break
+      fi
+    done
+    [ "${all_ok}" = 1 ] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# P3：数据面就绪自检——render/start/reload 后逐个探活 TCP 类入站端口，
+# 未监听时明确报出端口（端口冲突/绑定失败定位）；纯 UDP（hy2/tuic）节点
+# 与全 UDP 部署跳过（TCP 探活不适用，进程存活由 watchdog 保证）。
+verify_data_plane_ready() {
+  local tag protocol ports="" tcp_count
+  [ -f "${NODES_FILE}" ] || return 0
+  while IFS= read -r tag; do
+    [ -n "${tag}" ] || continue
+    protocol="$(node_value "$tag" "protocol")"
+    case "${protocol}" in
+    vless-reality | vless-ws-tls | anytls | vless-argo | socks5)
+      ports="${ports} $(node_value "$tag" "port")"
+      ;;
+    esac
+  done < <(iter_node_tags)
+  tcp_count="$(tcp_probeable_node_count)"
+  if [ "${tcp_count}" -eq 0 ]; then
+    print_info "当前无 TCP 类入站节点（均为 UDP 或空），跳过端口就绪探活。"
+    return 0
+  fi
+  ports="${ports# }"
+  if await_tcp_ports "127.0.0.1" "${ports}" 3; then
+    print_ok "数据面就绪：${tcp_count} 个 TCP 入站端口可探测。"
+    return 0
+  fi
+  print_err "数据面就绪自检失败：TCP 入站端口未监听或存在冲突。端口：${ports}"
+  print_err "可用 ss -ltnup 检查占用情况；确认冲突后调整节点端口并重新应用。"
+  return 1
+}
+
 start_service() {
   [ -x "${SINGBOX_BIN}" ] || fatal "尚未安装 sing-box。"
   rotate_log_file "${BASE_DIR}/logs/sing-box.log" || true

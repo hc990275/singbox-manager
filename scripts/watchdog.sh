@@ -73,56 +73,79 @@ ensure_log_rotation() {
   done < <(find "${LOG_DIR}" -type f -name '*.cloudflared.log' 2>/dev/null)
 }
 
+# P2：数据面探活失败计数与升级——按 SBM_PROBE_FAIL_LIMIT（默认 3）
+# 允许达 N 次连续失败后才强制重启（失败计数在下一轮探活成功时清零）。
+# 三态语义见 singbox_probe_status：0=健康、1=假死候选、2=不适用。
+probe_fail_escalate() {
+  local restart_cmd="$1"
+  local probe_fail_file="${RUNTIME_DIR}/probe_fail_count"
+  local probe_fail probe_fail_limit
+  probe_fail_limit="${SBM_PROBE_FAIL_LIMIT:-3}"
+  if [ -f "${probe_fail_file}" ]; then
+    probe_fail="$(tr -dc '0-9' <"${probe_fail_file}" 2>/dev/null || true)"
+  fi
+  probe_fail="${probe_fail:-0}"
+  probe_fail=$((probe_fail + 1))
+  printf '%s' "${probe_fail}" >"${probe_fail_file}"
+  chmod 600 "${probe_fail_file}"
+  if [ "${probe_fail}" -lt "${probe_fail_limit}" ]; then
+    print_warn "sing-box 数据面探活失败 ${probe_fail}/${probe_fail_limit} 次，暂不重启（避免瞬断误杀）。"
+    return 0
+  fi
+  rm -f "${probe_fail_file}"
+  print_warn "sing-box 连续 ${probe_fail} 次数据面探活失败，判定假死，强制重启。"
+  eval "${restart_cmd}"
+}
+
 ensure_singbox() {
   if [ ! -x "${SINGBOX_BIN}" ] || [ ! -f "${CONFIG_FILE}" ]; then
     return 0
   fi
 
+  local pid
+  local status
+
   if systemd_available; then
     if ! systemctl is-active --quiet "${SERVICE_NAME}"; then
       systemctl restart "${SERVICE_NAME}" >/dev/null 2>&1 || true
+      return 0
     fi
+    singbox_probe_status; status=$?
+    if [ "${status}" = 0 ] || [ "${status}" = 2 ]; then
+      rm -f "${RUNTIME_DIR}/probe_fail_count"
+      return 0
+    fi
+    probe_fail_escalate "systemctl restart ${SERVICE_NAME} >/dev/null 2>&1 || true"
     return 0
   fi
 
   if openrc_available; then
-    if ! rc-service "${SERVICE_NAME}" status >/dev/null 2>&1; then
-      kill_pid_file "${PID_FILE}" "${SINGBOX_BIN}"
-      rc-service "${SERVICE_NAME}" restart >/dev/null 2>&1 || rc-service "${SERVICE_NAME}" start >/dev/null 2>&1 || true
+    if rc-service "${SERVICE_NAME}" status >/dev/null 2>&1; then
+      singbox_probe_status; status=$?
+      if [ "${status}" = 0 ] || [ "${status}" = 2 ]; then
+        rm -f "${RUNTIME_DIR}/probe_fail_count"
+        return 0
+      fi
+      probe_fail_escalate "rc-service ${SERVICE_NAME} restart >/dev/null 2>&1 || rc-service ${SERVICE_NAME} start >/dev/null 2>&1 || true"
+      return 0
     fi
+    kill_pid_file "${PID_FILE}" "${SINGBOX_BIN}"
+    rc-service "${SERVICE_NAME}" restart >/dev/null 2>&1 || rc-service "${SERVICE_NAME}" start >/dev/null 2>&1 || true
     return 0
   fi
 
-  local pid
-  local probe_fail_file probe_fail probe_fail_limit
   pid="$(read_pid_file "${PID_FILE}" 2>/dev/null || true)"
   # 存活且（/proc 可用时）确为 sing-box 实例才认为健康，防止 PID 复用导致漏重启
   if [ -n "${pid}" ] && pid_matches_binary_or_alive "${pid}" "${SINGBOX_BIN}"; then
-    # S1：进程存活但所有节点端口均不可探测（数据面无响应）时视为假死，按失败计数重启
-    if [ -f "${NODES_FILE}" ] && any_node_port_alive; then
+    # S1：进程存活但所有 TCP 类节点端口均不可探测（数据面无响应）时视为假死，
+    #     按失败计数升级重启；全 UDP 部署（status=2）以进程存活为准视为健康。
+    singbox_probe_status; status=$?
+    if [ "${status}" = 0 ] || [ "${status}" = 2 ]; then
       rm -f "${RUNTIME_DIR}/probe_fail_count"
       return 0
     fi
-    if [ -f "${NODES_FILE}" ]; then
-      local probe_fail
-      probe_fail_file="${RUNTIME_DIR}/probe_fail_count"
-      if [ -f "${probe_fail_file}" ]; then
-        probe_fail="$(tr -dc '0-9' <"${probe_fail_file}" 2>/dev/null || true)"
-      fi
-      probe_fail="${probe_fail:-0}"
-      probe_fail=$((probe_fail + 1))
-      printf '%s' "${probe_fail}" >"${probe_fail_file}"
-      chmod 600 "${probe_fail_file}"
-      probe_fail_limit="${SBM_PROBE_FAIL_LIMIT:-3}"
-      if [ "${probe_fail}" -lt "${probe_fail_limit}" ]; then
-        print_warn "sing-box 端口探活失败 ${probe_fail}/${probe_fail_limit} 次，跳过本轮重启。"
-        return 0
-      fi
-      rm -f "${probe_fail_file}"
-      print_warn "sing-box 连续 ${probe_fail} 次探活失败，判定假死，强制重启。"
-    else
-      return 0
-    fi
+    probe_fail_escalate "rm -f \"${PID_FILE}\"; start_non_systemd_singbox"
+    return 0
   fi
 
   rm -f "${PID_FILE}"

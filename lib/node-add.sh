@@ -40,7 +40,7 @@ add_vless_reality() {
     --arg uuid "$uuid" \
     --arg private_key "$private_key" '{ uuid: $uuid, private_key: $private_key }')"
 
-  if ! save_node_bundle "$tag" "$node_json" "$secret_json" || ! render_config || ! start_service; then
+  if ! save_node_bundle "$tag" "$node_json" "$secret_json" || ! render_config || ! reload_service; then
     rollback_new_node "$tag"
     release_lock
     fatal "添加节点失败：${name}"
@@ -92,7 +92,7 @@ add_vless_ws_tls() {
 
   secret_json="$(jq -n --arg uuid "$uuid" '{ uuid: $uuid }')"
 
-  if ! save_node_bundle "$tag" "$node_json" "$secret_json" || ! render_config || ! start_service; then
+  if ! save_node_bundle "$tag" "$node_json" "$secret_json" || ! render_config || ! reload_service; then
     rollback_new_node "$tag" "$cert_file" "$key_file"
     release_lock
     fatal "添加节点失败：${name}"
@@ -138,7 +138,7 @@ add_anytls() {
 
   secret_json="$(jq -n --arg password "$password" '{ password: $password }')"
 
-  if ! save_node_bundle "$tag" "$node_json" "$secret_json" || ! render_config || ! start_service; then
+  if ! save_node_bundle "$tag" "$node_json" "$secret_json" || ! render_config || ! reload_service; then
     rollback_new_node "$tag" "$cert_file" "$key_file"
     release_lock
     fatal "添加节点失败：${name}"
@@ -197,7 +197,7 @@ add_vless_argo() {
     --arg uuid "$uuid" \
     --arg argo_token "$argo_token" '{ uuid: $uuid, argo_token: $argo_token }')"
 
-  if ! save_node_bundle "$tag" "$node_json" "$secret_json" || ! render_config || ! start_service || ! start_argo_node "$tag"; then
+  if ! save_node_bundle "$tag" "$node_json" "$secret_json" || ! render_config || ! reload_service || ! start_argo_node "$tag"; then
     rollback_new_node "$tag"
     release_lock
     fatal "添加节点失败：${name}"
@@ -245,7 +245,7 @@ add_tuic_v5() {
 
   secret_json="$(jq -n --arg uuid "$uuid" --arg password "$password" '{ uuid: $uuid, password: $password }')"
 
-  if ! save_node_bundle "$tag" "$node_json" "$secret_json" || ! render_config || ! start_service; then
+  if ! save_node_bundle "$tag" "$node_json" "$secret_json" || ! render_config || ! reload_service; then
     rollback_new_node "$tag" "$cert_file" "$key_file"
     release_lock
     fatal "添加节点失败：${name}"
@@ -299,7 +299,7 @@ add_hy2() {
 
   secret_json="$(jq -n --arg password "$password" '{ password: $password }')"
 
-  if ! save_node_bundle "$tag" "$node_json" "$secret_json" || ! render_config || ! start_service; then
+  if ! save_node_bundle "$tag" "$node_json" "$secret_json" || ! render_config || ! reload_service; then
     rollback_new_node "$tag" "$cert_file" "$key_file"
     release_lock
     fatal "添加节点失败：${name}"
@@ -334,7 +334,7 @@ add_socks5() {
 
   secret_json="$(jq -n --arg password "$password" '{ password: $password }')"
 
-  if ! save_node_bundle "$tag" "$node_json" "$secret_json" || ! render_config || ! start_service; then
+  if ! save_node_bundle "$tag" "$node_json" "$secret_json" || ! render_config || ! reload_service; then
     rollback_new_node "$tag"
     release_lock
     fatal "添加节点失败：${name}"
